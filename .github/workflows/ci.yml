@@ -1,0 +1,99 @@
+name: AIWork CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  contracts:
+    name: Smart Contracts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Compile contracts
+        run: bunx hardhat compile
+
+      - name: Run contract tests
+        run: bunx hardhat test
+
+  server:
+    name: API Server
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: cd server && bun install
+
+      - name: Type check + build
+        run: cd server && bun build src/index.ts --target=bun --outdir=dist
+
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: cd frontend && bun install
+
+      - name: Build
+        run: cd frontend && bun run build
+
+  sdk:
+    name: SDK & Agent Runner
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install workspace deps
+        run: bun install
+
+      - name: Build SDK
+        run: cd packages/sdk && bun build src/index.ts --outdir=dist --target=node
+
+      - name: Build Agent Runner
+        run: cd packages/agent-runner && bun build src/index.ts --outdir=dist --target=node
+
+  cli:
+    name: CLI
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install workspace deps
+        run: bun install
+
+      - name: Verify CLI
+        run: cd cli && bun run index.ts --help

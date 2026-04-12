@@ -1,0 +1,29 @@
+issuer: http://daytona-dex:5556/dex
+
+storage:
+  type: sqlite3
+  config:
+    file: /var/dex/dex.db
+
+web:
+  http: 0.0.0.0:5556
+
+oauth2:
+  skipApprovalScreen: true
+
+staticClients:
+  - id: daytona
+    name: Daytona
+    redirectURIs:
+      - http://localhost:3100/callback
+      - http://localhost:3100/dashboard/callback
+    secret: aiwork-daytona-dex-secret
+
+enablePasswordDB: true
+
+staticPasswords:
+  - email: dev@daytona.io
+    # bcrypt hash of "password"
+    hash: "$2a$10$2b2cU8CPhOTaGrs1HRQuAueS7JTT5ZHsHSzYiFPm1leZck7Mc8T4W"
+    username: admin
+    userID: "08a8684b-db88-4b73-90a9-3cd1661f5466"

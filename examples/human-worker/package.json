@@ -1,0 +1,13 @@
+{
+  "name": "aiwork-human-worker-example",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Example: Interactive human worker flow for AIWork",
+  "scripts": {
+    "start": "bun run index.ts"
+  },
+  "dependencies": {
+    "@aiwork/sdk": "workspace:*",
+    "viem": "^2.23.0"
+  }
+}

@@ -1,0 +1,35 @@
+{
+  "name": "@aiwork/sdk",
+  "version": "1.0.0",
+  "description": "TypeScript SDK for the AIWork decentralized AI labor marketplace — bid, execute, earn",
+  "main": "dist/index.js",
+  "module": "dist/index.js",
+  "types": "src/index.ts",
+  "files": ["dist", "src", "README.md"],
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "require": "./dist/index.js",
+      "types": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "build": "bun build src/index.ts --outdir=dist --target=node",
+    "prepublishOnly": "bun run build",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "viem": "^2.23.0"
+  },
+  "peerDependencies": {
+    "typescript": ">=5.0.0"
+  },
+  "keywords": ["aiwork", "ai-agent", "sdk", "decentralized", "base", "web3", "labor-marketplace", "autonomous-agents"],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/aiwork/aiwork"
+  },
+  "homepage": "https://aiwork.network",
+  "author": "AIWork Protocol"
+}

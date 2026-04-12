@@ -1,0 +1,460 @@
+# AIWork v2 — Full Self-Hosted Stack
+# Usage: docker compose up -d
+
+services:
+  # ═══════════════════════════════════════════════════════════
+  # DATABASE — Persistent storage for tasks, agents, bids
+  # ═══════════════════════════════════════════════════════════
+  postgres:
+    image: postgres:latest
+    container_name: aiwork-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: aiwork
+      POSTGRES_USER: aiwork
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-aiwork_secret_change_me}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql
+      - ./docker/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aiwork"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+
+  # ═══════════════════════════════════════════════════════════
+  # NOTE: Redis removed — bunqueue (embedded SQLite) handles
+  # job queues, pub/sub, and scheduling. Zero external deps.
+  # ═══════════════════════════════════════════════════════════
+
+
+  # ═══════════════════════════════════════════════════════════
+  # FORGEJO — Private git repos for task delivery
+  # ═══════════════════════════════════════════════════════════
+  forgejo:
+    image: codeberg.org/forgejo/forgejo:10
+    container_name: aiwork-forgejo
+    restart: unless-stopped
+    environment:
+      - USER_UID=1000
+      - USER_GID=1000
+      # Server
+      - FORGEJO__server__DOMAIN=${FORGEJO_DOMAIN:-localhost}
+      - FORGEJO__server__ROOT_URL=http://${FORGEJO_DOMAIN:-localhost}/
+      - FORGEJO__server__HTTP_PORT=3000
+      # Database — use postgres
+      - FORGEJO__database__DB_TYPE=postgres
+      - FORGEJO__database__HOST=postgres:5432
+      - FORGEJO__database__NAME=forgejo
+      - FORGEJO__database__USER=aiwork
+      - FORGEJO__database__PASSWD=${POSTGRES_PASSWORD:-aiwork_secret_change_me}
+      # Security
+      - FORGEJO__service__DISABLE_REGISTRATION=true
+      - FORGEJO__service__REQUIRE_SIGNIN_VIEW=false
+      # Webhook
+      - FORGEJO__webhook__ALLOWED_HOST_LIST=*
+    ports:
+      - "3000:3000"
+      - "2222:22"
+    volumes:
+      - forgejodata:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ═══════════════════════════════════════════════════════════
+  # DAYTONA — Self-hosted sandbox infrastructure
+  # Provides isolated execution environments for code verification:
+  #   clone → install → test → lint → quality score
+  # Core services: api, runner, dex (auth), redis, postgres, minio, registry
+  # ═══════════════════════════════════════════════════════════
+
+  daytona-api:
+    image: daytonaio/daytona-api
+    container_name: aiwork-daytona-api
+    restart: unless-stopped
+    privileged: true
+    environment:
+      - DEFAULT_SNAPSHOT=daytonaio/sandbox:0.5.0-slim
+      - ENCRYPTION_KEY=${DAYTONA_ENCRYPTION_KEY:-aiwork-daytona-enc-key}
+      - ENCRYPTION_SALT=${DAYTONA_ENCRYPTION_SALT:-aiwork-daytona-enc-salt}
+      - NODE_ENV=production
+      - PORT=3100
+      - DB_HOST=daytona-db
+      - DB_PORT=5432
+      - DB_USERNAME=daytona
+      - DB_PASSWORD=${DAYTONA_DB_PASSWORD:-daytona_secret}
+      - DB_DATABASE=daytona
+      - REDIS_HOST=daytona-redis
+      - REDIS_PORT=6379
+      - OIDC_CLIENT_ID=daytona
+      - OIDC_ISSUER_BASE_URL=http://daytona-dex:5556/dex
+      - PUBLIC_OIDC_DOMAIN=http://localhost:5556/dex
+      - OIDC_AUDIENCE=daytona
+      - DASHBOARD_URL=http://localhost:3100/dashboard
+      - DASHBOARD_BASE_API_URL=http://localhost:3100
+      - TRANSIENT_REGISTRY_URL=http://daytona-registry:6000
+      - TRANSIENT_REGISTRY_ADMIN=admin
+      - TRANSIENT_REGISTRY_PASSWORD=password
+      - TRANSIENT_REGISTRY_PROJECT_ID=daytona
+      - INTERNAL_REGISTRY_URL=http://daytona-registry:6000
+      - INTERNAL_REGISTRY_ADMIN=admin
+      - INTERNAL_REGISTRY_PASSWORD=password
+      - INTERNAL_REGISTRY_PROJECT_ID=daytona
+      - S3_ENDPOINT=http://daytona-minio:9000
+      - S3_STS_ENDPOINT=http://daytona-minio:9000/minio/v1/assume-role
+      - S3_REGION=us-east-1
+      - S3_ACCESS_KEY=minioadmin
+      - S3_SECRET_KEY=minioadmin
+      - S3_DEFAULT_BUCKET=daytona
+      - S3_ACCOUNT_ID=/
+      - S3_ROLE_NAME=/
+      - ENVIRONMENT=docker-compose
+      - PROXY_DOMAIN=daytona-proxy:4000
+      - PROXY_PROTOCOL=http
+      - PROXY_API_KEY=aiwork_daytona_proxy_key
+      - DEFAULT_RUNNER_DOMAIN=daytona-runner:3003
+      - DEFAULT_RUNNER_API_URL=http://daytona-runner:3003
+      - DEFAULT_RUNNER_PROXY_URL=http://daytona-runner:3003
+      - DEFAULT_RUNNER_API_KEY=aiwork_daytona_runner_key
+      - DEFAULT_RUNNER_CPU=4
+      - DEFAULT_RUNNER_MEMORY=8
+      - DEFAULT_RUNNER_DISK=50
+      - DEFAULT_RUNNER_NAME=default
+      - DEFAULT_REGION_ID=us
+      - DEFAULT_REGION_NAME=us
+      - RESOURCE_LIMITS_DISABLED=true
+      - SKIP_USER_EMAIL_VERIFICATION=true
+      - RUN_MIGRATIONS=true
+      - MAINTENANCE_MODE=false
+      - OTEL_ENABLED=false
+    ports:
+      - "3100:3100"
+    depends_on:
+      - daytona-db
+      - daytona-runner
+      - daytona-redis
+      - daytona-dex
+      - daytona-registry
+
+  daytona-runner:
+    image: daytonaio/daytona-runner
+    container_name: aiwork-daytona-runner
+    restart: unless-stopped
+    privileged: true
+    environment:
+      - ENVIRONMENT=development
+      - API_PORT=3003
+      - DAYTONA_RUNNER_TOKEN=aiwork_daytona_runner_key
+      - RESOURCE_LIMITS_DISABLED=true
+      - AWS_ENDPOINT_URL=http://daytona-minio:9000
+      - AWS_REGION=us-east-1
+      - AWS_ACCESS_KEY_ID=minioadmin
+      - AWS_SECRET_ACCESS_KEY=minioadmin
+      - AWS_DEFAULT_BUCKET=daytona
+      - DAYTONA_API_URL=http://daytona-api:3100/api
+      - RUNNER_DOMAIN=daytona-runner
+      - SSH_GATEWAY_ENABLE=false
+      - INTER_SANDBOX_NETWORK_ENABLED=false
+    ports:
+      - "3003:3003"
+
+  daytona-db:
+    image: postgres:18
+    container_name: aiwork-daytona-db
+    restart: unless-stopped
+    environment:
+      - POSTGRES_PASSWORD=${DAYTONA_DB_PASSWORD:-daytona_secret}
+      - POSTGRES_USER=daytona
+      - POSTGRES_DB=daytona
+    volumes:
+      - daytonadb:/var/lib/postgresql/18/docker
+
+  daytona-redis:
+    image: redis:latest
+    container_name: aiwork-daytona-redis
+    restart: unless-stopped
+
+  daytona-dex:
+    image: dexidp/dex:v2.42.0
+    container_name: aiwork-daytona-dex
+    restart: unless-stopped
+    volumes:
+      - ./docker/daytona/dex-config.yaml:/etc/dex/config.yaml
+      - daytonadex:/var/dex
+    entrypoint: ['sh', '-c', 'touch /var/dex/dex.db && exec dex serve /etc/dex/config.yaml']
+    ports:
+      - "5556:5556"
+
+  daytona-registry:
+    image: registry:2.8.2
+    container_name: aiwork-daytona-registry
+    restart: unless-stopped
+    environment:
+      REGISTRY_STORAGE_DELETE_ENABLED: 'true'
+      REGISTRY_HTTP_ADDR: '0.0.0.0:6000'
+    volumes:
+      - daytonaregistry:/var/lib/registry
+    ports:
+      - "6000:6000"
+
+  daytona-minio:
+    image: minio/minio:latest
+    container_name: aiwork-daytona-minio
+    restart: unless-stopped
+    environment:
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin
+    volumes:
+      - daytonaminio:/data
+    command: server /data --console-address ":9001"
+    ports:
+      - "9001:9001"
+
+  # ═══════════════════════════════════════════════════════════
+  # API — AIWork backend (Bun + Hono)
+  # ═══════════════════════════════════════════════════════════
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+    container_name: aiwork-api
+    restart: unless-stopped
+    environment:
+      - PORT=3001
+      - NODE_ENV=production
+      # Database
+      - DATABASE_URL=postgres://aiwork:${POSTGRES_PASSWORD:-aiwork_secret_change_me}@postgres:5432/aiwork
+      # Forgejo
+      - FORGEJO_URL=http://forgejo:3000
+      - FORGEJO_ADMIN_TOKEN=${FORGEJO_ADMIN_TOKEN}
+      - FORGEJO_ORG=aiwork
+      - FORGEJO_WEBHOOK_URL=http://api:3001/api/v1/webhooks/push
+      - FORGEJO_WEBHOOK_SECRET=${WEBHOOK_SECRET:-aiwork-webhook-secret}
+      # IPFS
+      - IPFS_API_URL=http://ipfs:5001
+      - IPFS_GATEWAY_URL=http://ipfs:8080
+      # Sandbox — Daytona self-hosted for code verification
+      - DAYTONA_API_URL=http://daytona-api:3100
+      - DAYTONA_API_KEY=${DAYTONA_API_KEY:-}
+      # Blockchain
+      - RPC_URL=${RPC_URL:-http://host.docker.internal:8545}
+      - PLATFORM_PRIVATE_KEY=${PLATFORM_PRIVATE_KEY:-0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80}
+      - TOKEN_ADDRESS=${TOKEN_ADDRESS}
+      - AGENT_REGISTRY_ADDRESS=${AGENT_REGISTRY_ADDRESS}
+      - ESCROW_VAULT_ADDRESS=${ESCROW_VAULT_ADDRESS}
+      - TASK_MANAGER_ADDRESS=${TASK_MANAGER_ADDRESS}
+      - BIDDING_ENGINE_ADDRESS=${BIDDING_ENGINE_ADDRESS}
+      # OpenTelemetry → SigNoz
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://aiwork-otel-collector:4318
+      - OTEL_SERVICE_NAME=aiwork-api
+      - OTEL_SERVICE_VERSION=2.0.0
+      - OTEL_RESOURCE_ATTRIBUTES=deployment.environment=production,platform=AIWork
+    ports:
+      - "3001:3001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      forgejo:
+        condition: service_started
+      signoz-otel-collector:
+        condition: service_started
+
+  # ═══════════════════════════════════════════════════════════
+  # FRONTEND — Vite build served via nginx (behind Caddy)
+  # ═══════════════════════════════════════════════════════════
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.frontend
+    container_name: aiwork-frontend
+    restart: unless-stopped
+    expose:
+      - "80"
+    depends_on:
+      - api
+
+  # ═══════════════════════════════════════════════════════════
+  # CADDY — Reverse proxy + auto HTTPS
+  # ═══════════════════════════════════════════════════════════
+  caddy:
+    image: caddy:2-alpine
+    container_name: aiwork-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./docker/Caddyfile:/etc/caddy/Caddyfile
+      - caddydata:/data
+      - caddyconfig:/config
+    depends_on:
+      - frontend
+      - api
+      - forgejo
+
+
+  # ═══════════════════════════════════════════════════════════
+  # NOTE: IPFS removed — task specs stored in PostgreSQL.
+  # Re-enable when decentralized spec storage is needed.
+  # ═══════════════════════════════════════════════════════════
+
+
+  # ═══════════════════════════════════════════════════════════
+  # SIGNOZ — Unified observability (metrics + traces + logs)
+  # Replaces Prometheus + Grafana with a single platform
+  # ═══════════════════════════════════════════════════════════
+  signoz-zookeeper:
+    image: signoz/zookeeper:3.7.1
+    container_name: aiwork-zookeeper
+    restart: unless-stopped
+    user: root
+    volumes:
+      - zookeeperdata:/bitnami/zookeeper
+    environment:
+      - ZOO_SERVER_ID=1
+      - ALLOW_ANONYMOUS_LOGIN=yes
+      - ZOO_AUTOPURGE_INTERVAL=1
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s -m 2 http://localhost:8080/commands/ruok | grep error | grep null"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  signoz-init-clickhouse:
+    image: clickhouse/clickhouse-server:25.5.6
+    container_name: aiwork-init-clickhouse
+    restart: on-failure
+    command:
+      - bash
+      - -c
+      - |
+        version="v0.0.1"
+        node_os=$$(uname -s | tr '[:upper:]' '[:lower:]')
+        node_arch=$$(uname -m | sed s/aarch64/arm64/ | sed s/x86_64/amd64/)
+        cd /tmp
+        wget -q -O histogram-quantile.tar.gz "https://github.com/SigNoz/signoz/releases/download/histogram-quantile%2F$${version}/histogram-quantile_$${node_os}_$${node_arch}.tar.gz" || true
+        tar -xzf histogram-quantile.tar.gz 2>/dev/null || true
+        mv histogram-quantile /var/lib/clickhouse/user_scripts/histogramQuantile 2>/dev/null || true
+    volumes:
+      - ./docker/signoz/clickhouse/user_scripts:/var/lib/clickhouse/user_scripts/
+    depends_on:
+      signoz-zookeeper:
+        condition: service_healthy
+
+  signoz-clickhouse:
+    image: clickhouse/clickhouse-server:25.5.6
+    container_name: aiwork-clickhouse
+    restart: unless-stopped
+    tty: true
+    environment:
+      - CLICKHOUSE_SKIP_USER_SETUP=1
+    volumes:
+      - ./docker/signoz/clickhouse/config.xml:/etc/clickhouse-server/config.xml
+      - ./docker/signoz/clickhouse/users.xml:/etc/clickhouse-server/users.xml
+      - ./docker/signoz/clickhouse/custom-function.xml:/etc/clickhouse-server/custom-function.xml
+      - ./docker/signoz/clickhouse/cluster.xml:/etc/clickhouse-server/config.d/cluster.xml
+      - ./docker/signoz/clickhouse/user_scripts:/var/lib/clickhouse/user_scripts/
+      - clickhousedata:/var/lib/clickhouse/
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "0.0.0.0:8123/ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    depends_on:
+      signoz-init-clickhouse:
+        condition: service_completed_successfully
+      signoz-zookeeper:
+        condition: service_healthy
+    ulimits:
+      nproc: 65535
+      nofile:
+        soft: 262144
+        hard: 262144
+
+  signoz-telemetry-migrator:
+    image: signoz/signoz-otel-collector:v0.144.2
+    container_name: aiwork-telemetry-migrator
+    restart: on-failure
+    environment:
+      - SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_DSN=tcp://signoz-clickhouse:9000
+      - SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_CLUSTER=cluster
+      - SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_REPLICATION=true
+      - SIGNOZ_OTEL_COLLECTOR_TIMEOUT=10m
+    entrypoint: ["/bin/sh"]
+    command:
+      - -c
+      - |
+        /signoz-otel-collector migrate bootstrap &&
+        /signoz-otel-collector migrate sync up &&
+        /signoz-otel-collector migrate async up
+    depends_on:
+      signoz-clickhouse:
+        condition: service_healthy
+
+  signoz:
+    image: signoz/signoz:v0.118.0
+    container_name: aiwork-signoz
+    restart: unless-stopped
+    ports:
+      - "8085:8080"
+    volumes:
+      - signozdata:/var/lib/signoz/
+    environment:
+      - SIGNOZ_ALERTMANAGER_PROVIDER=signoz
+      - SIGNOZ_TELEMETRYSTORE_CLICKHOUSE_DSN=tcp://signoz-clickhouse:9000
+      - SIGNOZ_SQLSTORE_SQLITE_PATH=/var/lib/signoz/signoz.db
+      - SIGNOZ_TOKENIZER_JWT_SECRET=${SIGNOZ_JWT_SECRET:-aiwork-signoz-secret}
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "localhost:8080/api/v1/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    depends_on:
+      signoz-clickhouse:
+        condition: service_healthy
+
+  signoz-otel-collector:
+    image: signoz/signoz-otel-collector:v0.144.2
+    container_name: aiwork-otel-collector
+    restart: unless-stopped
+    entrypoint: ["/bin/sh"]
+    command:
+      - -c
+      - |
+        /signoz-otel-collector migrate sync check &&
+        /signoz-otel-collector --config=/etc/otel-collector-config.yaml --manager-config=/etc/manager-config.yaml --copy-path=/var/tmp/collector-config.yaml
+    volumes:
+      - ./docker/signoz/otel/otel-collector-config.yaml:/etc/otel-collector-config.yaml
+      - ./docker/signoz/otel/otel-collector-opamp-config.yaml:/etc/manager-config.yaml
+    environment:
+      - OTEL_RESOURCE_ATTRIBUTES=host.name=aiwork-host,os.type=linux
+      - LOW_CARDINAL_EXCEPTION_GROUPING=false
+      - SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_DSN=tcp://signoz-clickhouse:9000
+      - SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_CLUSTER=cluster
+      - SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_REPLICATION=true
+      - SIGNOZ_OTEL_COLLECTOR_TIMEOUT=10m
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+    depends_on:
+      signoz-clickhouse:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  forgejodata:
+  daytonadb:
+  daytonadex:
+  daytonaregistry:
+  daytonaminio:
+  caddydata:
+  caddyconfig:
+  clickhousedata:
+  zookeeperdata:
+  signozdata:
+
+

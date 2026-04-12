@@ -1,0 +1,29 @@
+{
+  "name": "aiwork",
+  "version": "1.0.0",
+  "author": "",
+  "description": "AIWork — Decentralized AI Agent Work Protocol",
+  "keywords": ["blockchain", "ai", "agents", "crypto"],
+  "license": "MIT",
+  "workspaces": [
+    "packages/*",
+    "examples/*",
+    "cli"
+  ],
+  "scripts": {
+    "compile": "hardhat compile",
+    "test": "hardhat test",
+    "deploy:local": "hardhat run scripts/deploy.js",
+    "deploy:base-sepolia": "hardhat run scripts/deploy.js --network baseSepolia",
+    "node": "hardhat node"
+  },
+  "type": "commonjs",
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.4.4",
+    "@embedded-postgres/darwin-arm64": "^18.3.0-beta.16",
+    "@nomicfoundation/hardhat-toolbox": "^6.1.2",
+    "@openzeppelin/contracts": "^5.6.1",
+    "embedded-postgres": "^18.3.0-beta.16",
+    "hardhat": "2"
+  }
+}

@@ -1,0 +1,79 @@
+# AIWork v2 — Caddy Reverse Proxy
+# For local dev: HTTP only. For prod: set DOMAIN env var.
+
+{
+	# Disable auto HTTPS for localhost
+	auto_https off
+}
+
+http://git.aiwork.network {
+	reverse_proxy forgejo:3000
+}
+
+http://api.aiwork.network {
+	reverse_proxy api:3001
+}
+
+http://telemetry.aiwork.network {
+	basicauth {
+		admin $2a$14$o1BH/n5wSIZ5KbWDzJMGJuJh3cFR0dShFLybHo6hx5u8LD0RNFJy6
+	}
+	reverse_proxy signoz:8080
+}
+
+:80 {
+	# Frontend — main site
+	handle {
+		reverse_proxy frontend:80
+	}
+
+	# API (Legacy mapping)
+	handle_path /api/* {
+		reverse_proxy api:3001
+	}
+
+	# Forgejo git (Legacy mapping)
+	handle_path /git/* {
+		reverse_proxy forgejo:3000
+	}
+
+	# IPFS gateway (read-only)
+	handle_path /ipfs/* {
+		reverse_proxy ipfs:8080
+	}
+
+	# SigNoz Telemetry (Admin-only)
+	handle_path /telemetry/* {
+		basicauth {
+			admin $2a$14$o1BH/n5wSIZ5KbWDzJMGJuJh3cFR0dShFLybHo6hx5u8LD0RNFJy6
+		}
+		reverse_proxy signoz:8080
+	}
+
+	# SSE — no buffering
+	@sse {
+		path /api/v1/webhooks/activity/stream
+	}
+	handle @sse {
+		reverse_proxy api:3001 {
+			flush_interval -1
+		}
+	}
+
+	# Security headers
+	header {
+		X-Content-Type-Options nosniff
+		X-Frame-Options SAMEORIGIN
+		Referrer-Policy strict-origin-when-cross-origin
+		-Server
+	}
+
+	# Compression
+	encode gzip zstd
+
+	# Logs
+	log {
+		output stdout
+		format json
+	}
+}

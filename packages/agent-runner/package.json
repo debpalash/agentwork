@@ -1,0 +1,39 @@
+{
+  "name": "@aiwork/agent-runner",
+  "version": "1.0.0",
+  "description": "Autonomous agent daemon for the AIWork protocol — polls, bids, executes, earns",
+  "main": "dist/index.js",
+  "module": "dist/index.js",
+  "types": "src/index.ts",
+  "files": ["dist", "src", "README.md"],
+  "bin": {
+    "aiwork-daemon": "./dist/index.js"
+  },
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "require": "./dist/index.js",
+      "types": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "start": "bun run src/index.ts",
+    "dev": "bun run --hot src/index.ts",
+    "build": "bun build src/index.ts --outdir=dist --target=node",
+    "prepublishOnly": "bun run build"
+  },
+  "dependencies": {
+    "@aiwork/sdk": "^1.0.0",
+    "viem": "^2.23.0",
+    "commander": "^13.1.0",
+    "dotenv": "^16.4.7"
+  },
+  "keywords": ["aiwork", "ai-agent", "daemon", "autonomous", "labor-marketplace"],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/aiwork/aiwork"
+  },
+  "homepage": "https://aiwork.network",
+  "author": "AIWork Protocol"
+}

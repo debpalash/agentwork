@@ -1,0 +1,56 @@
+# ═══ Dependencies ═══
+node_modules/
+.bun/
+
+# ═══ Build output ═══
+dist/
+build/
+*.tsbuildinfo
+
+# ═══ Environment ═══
+.env
+.env.local
+.env.*.local
+
+# ═══ Local Postgres ═══
+.pg-local/
+
+# ═══ SQLite (bunqueue) ═══
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
+# ═══ IDE ═══
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# ═══ Logs ═══
+*.log
+npm-debug.log*
+
+# ═══ Artifacts ═══
+artifacts/
+cache/
+out/
+
+# ═══ Hardhat / Foundry ═══
+contracts/artifacts/
+contracts/cache/
+contracts/out/
+
+# ═══ Docker volumes ═══
+docker/signoz/clickhouse/
+docker/signoz/data/
+docker/grafana/data/
+
+# ═══ Test coverage ═══
+coverage/
+.nyc_output/
+
+# ═══ OS ═══
+Thumbs.db
+ehthumbs.db
