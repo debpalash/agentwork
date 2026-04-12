@@ -158,19 +158,19 @@ agentRoutes.get("/wallet/:address", async (c) => {
   }
 });
 
-// ─── List All Agents (indexed from events) ─────────────────────
+// ─── List All Agents (chain + DB merge) ─────────────────────────
 import { parseAbiItem } from "viem";
+import { pool } from "../db/index";
 
 agentRoutes.get("/", async (c) => {
   try {
+    // 1. Chain agents (primary source of truth)
     const totalAgents = await publicClient.readContract({
       address: CONTRACTS.agentRegistry,
       abi: AGENT_REGISTRY_ABI,
       functionName: "totalAgents",
     });
 
-    // Get AgentRegistered events — note: agentId is indexed string (hashed),
-    // so we use the wallet address instead and look up the real agentId
     const logs = await publicClient.getLogs({
       address: CONTRACTS.agentRegistry,
       event: parseAbiItem("event AgentRegistered(string indexed agentId, address indexed wallet, uint8 category)"),
@@ -180,10 +180,9 @@ agentRoutes.get("/", async (c) => {
     const categories = ["NLP", "VISION", "CODE", "DATA", "CREATIVE", "REASONING", "MULTIMODAL", "SPECIALIZED"];
     const statuses = ["PENDING", "ACTIVE", "SUSPENDED", "BANNED", "RETIRED"];
 
-    const agents = await Promise.all(
+    const chainAgents = await Promise.all(
       logs.map(async (log: any) => {
         try {
-          // Use wallet address to look up the actual agentId string
           const walletAddr = log.args.wallet;
           const agentId = await publicClient.readContract({
             address: CONTRACTS.agentRegistry,
@@ -214,12 +213,54 @@ agentRoutes.get("/", async (c) => {
             tasksFailed: Number(raw[11]),
             avgQualityScore: Number(raw[13]),
             currentStreak: Number(raw[14]),
+            source: "chain",
           };
         } catch { return null; }
       })
     );
 
-    return c.json({ totalAgents: Number(totalAgents), agents: agents.filter(Boolean) });
+    const validChainAgents = chainAgents.filter(Boolean);
+    const chainWallets = new Set(validChainAgents.map((a: any) => a.walletAddress?.toLowerCase()));
+
+    // 2. DB agents (not yet on-chain)
+    let dbOnlyAgents: any[] = [];
+    try {
+      const dbResult = await pool.query(`
+        SELECT agent_id, wallet_address, category, status, reputation_score,
+               tasks_completed, tasks_failed, total_earned, created_at
+        FROM agents
+        ORDER BY created_at DESC
+      `);
+
+      dbOnlyAgents = dbResult.rows
+        .filter((row: any) => !chainWallets.has(row.wallet_address?.toLowerCase()))
+        .map((row: any) => ({
+          agentId: row.agent_id,
+          walletAddress: row.wallet_address,
+          category: row.category || "CODE",
+          status: row.status || "ACTIVE",
+          reputationScore: Number(row.reputation_score || 0),
+          reputationPercent: ((Number(row.reputation_score || 0)) / 100).toFixed(1) + "%",
+          totalEarned: String(row.total_earned || 0),
+          isVerified: false,
+          tasksCompleted: Number(row.tasks_completed || 0),
+          tasksFailed: Number(row.tasks_failed || 0),
+          avgQualityScore: 0,
+          currentStreak: 0,
+          source: "db",
+        }));
+    } catch {
+      // DB unavailable — return chain-only
+    }
+
+    const merged = [...validChainAgents, ...dbOnlyAgents];
+
+    return c.json({
+      totalAgents: merged.length,
+      chainTotal: Number(totalAgents),
+      dbOnly: dbOnlyAgents.length,
+      agents: merged,
+    });
   } catch (err: any) {
     return c.json({ error: err.message }, 500);
   }

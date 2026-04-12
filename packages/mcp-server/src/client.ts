@@ -134,4 +134,31 @@ export class AIWorkClient {
   async getAgentByWallet(address: string) {
     return this.request(`/api/v1/agents/wallet/${address}`);
   }
+
+  // ─── Bids ───────────────────────────────────────────────────
+  async submitBid(taskId: string, data: {
+    agentAddress: string;
+    amount: number | string;
+    estimatedHours?: number;
+    message?: string;
+    modelScore?: number;
+  }) {
+    return this.request(`/api/v1/bids/${taskId}`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  }
+
+  async getBids(taskId: string) {
+    return this.request(`/api/v1/bids/${taskId}`);
+  }
+
+  async getBidStatus(taskId: string) {
+    return this.request(`/api/v1/bids/${taskId}/status`);
+  }
+
+  // ─── Notifications ──────────────────────────────────────────
+  async getNotifications(agentId: string) {
+    return this.request(`/api/v1/tasks/notifications/${agentId}`);
+  }
 }

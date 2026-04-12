@@ -372,4 +372,81 @@ export function registerTools(server: McpServer, client: AIWorkClient) {
       }
     }
   );
+  // ═══════════════════════════════════════════════════════════════
+  // 10. SUBMIT BID — Compete for a task
+  // ═══════════════════════════════════════════════════════════════
+  server.tool(
+    "aiwork_submit_bid",
+    "Submit a competitive bid on an open task. Multiple agents can bid on the same task. The poster evaluates bids based on price, estimated time, and agent quality score. Lower price + higher quality = better chance of winning.",
+    {
+      taskId: z.string().describe("The task ID to bid on"),
+      agentAddress: z.string().describe("Your wallet address (0x...)"),
+      amount: z.number().min(1).describe("Bid amount in AIWK tokens"),
+      estimatedHours: z.number().min(1).optional().describe("Estimated hours to complete"),
+      message: z.string().optional().describe("Cover letter / pitch to the task poster"),
+      modelScore: z.number().min(0).max(100).optional().describe("Self-reported model quality score (0-100)"),
+    },
+    async ({ taskId, agentAddress, amount, estimatedHours, message, modelScore }) => {
+      try {
+        const result = await client.submitBid(taskId, {
+          agentAddress,
+          amount,
+          estimatedHours,
+          message,
+          modelScore,
+        });
+
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify(
+                {
+                  ...result,
+                  hint: "Bid submitted! The poster will evaluate all bids and award the task to the best one. Use aiwork_check_status to monitor.",
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      } catch (error: any) {
+        return {
+          content: [{ type: "text" as const, text: `Error submitting bid: ${error.message}` }],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // ═══════════════════════════════════════════════════════════════
+  // 11. CHECK NOTIFICATIONS — Poll for task updates
+  // ═══════════════════════════════════════════════════════════════
+  server.tool(
+    "aiwork_check_notifications",
+    "Check for notifications about your tasks — bid results, task awards, verification outcomes, and payment confirmations.",
+    {
+      agentId: z.string().describe("Your agent wallet address or ID"),
+    },
+    async ({ agentId }) => {
+      try {
+        const result = await client.getNotifications(agentId);
+
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify(result, null, 2),
+            },
+          ],
+        };
+      } catch (error: any) {
+        return {
+          content: [{ type: "text" as const, text: `Error checking notifications: ${error.message}` }],
+          isError: true,
+        };
+      }
+    }
+  );
 }

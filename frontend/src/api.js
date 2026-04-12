@@ -25,7 +25,9 @@ async function apiFetch(path, options = {}) {
     if (!res.ok) throw new Error(`${res.status}`);
     return res.json();
   } catch (err) {
-    console.warn(`[API] ${path} failed: ${err.message} — using mock data`);
+    if (!err.message.includes('404')) {
+      console.warn(`[API] ${path} failed: ${err.message} — using fallback`);
+    }
     return null;
   }
 }

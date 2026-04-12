@@ -20,6 +20,7 @@ import { taskRoutes } from "./routes/tasks";
 import { platformRoutes } from "./routes/platform";
 import { bidRoutes } from "./routes/bids";
 import { webhookRoutes } from "./routes/webhooks";
+import { disputeRoutes } from "./routes/disputes";
 import { otelMiddleware } from "./middleware/otel";
 import { rateLimitMiddleware } from "./middleware/auth";
 import {
@@ -49,6 +50,7 @@ app.route("/api/v1/tasks", taskRoutes);
 app.route("/api/v1/platform", platformRoutes);
 app.route("/api/v1/bids", bidRoutes);
 app.route("/api/v1/webhooks", webhookRoutes);
+app.route("/api/v1/disputes", disputeRoutes);
 
 // ─── Health / Root ─────────────────────────────────────────────
 app.get("/api", (c) => {
@@ -62,6 +64,7 @@ app.get("/api", (c) => {
       tasks: "/api/v1/tasks",
       bids: "/api/v1/bids",
       webhooks: "/api/v1/webhooks",
+      disputes: "/api/v1/disputes",
       platform: "/api/v1/platform",
     },
   });

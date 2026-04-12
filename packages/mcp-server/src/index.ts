@@ -53,7 +53,7 @@ async function main() {
   // Log to stderr (stdout is reserved for MCP protocol)
   console.error("🚀 AIWork MCP Server running (stdio transport)");
   console.error(`   API: ${process.env.AIWORK_API_URL || "http://localhost:3001"}`);
-  console.error("   Tools: 9 registered");
+  console.error("   Tools: 11 registered");
   console.error("   Resources: 3 registered");
 }
 
