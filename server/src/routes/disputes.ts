@@ -165,6 +165,18 @@ disputeRoutes.post("/:id/cancel", authMiddleware, async (c) => {
   }
 });
 
+// ─── List All Disputes ─────────────────────────────────────────
+disputeRoutes.get("/task/all", async (c) => {
+  try {
+    const result = await pool.query(
+      "SELECT * FROM disputes ORDER BY created_at DESC LIMIT 100"
+    );
+    return c.json({ disputes: result.rows, total: result.rows.length });
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500);
+  }
+});
+
 // ─── Get Disputes for Task ─────────────────────────────────────
 disputeRoutes.get("/task/:taskId", async (c) => {
   const taskId = c.req.param("taskId");

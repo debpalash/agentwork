@@ -12,6 +12,7 @@ import BidArena from './pages/BidArena'
 import TaskDetails from './pages/TaskDetails'
 import Profile from './pages/Profile'
 import Docs from './pages/Docs'
+import Disputes from './pages/Disputes'
 import { Web3Provider } from './context/Web3Context'
 import Navbar from './components/Navbar'
 
@@ -47,6 +48,7 @@ const bidRoute = createRoute({ getParentRoute: () => rootRoute, path: '/bid', co
 const detailsRoute = createRoute({ getParentRoute: () => rootRoute, path: '/details', component: TaskDetails })
 const profileRoute = createRoute({ getParentRoute: () => rootRoute, path: '/profile', component: Profile })
 const docsRoute = createRoute({ getParentRoute: () => rootRoute, path: '/docs', component: Docs })
+const disputesRoute = createRoute({ getParentRoute: () => rootRoute, path: '/disputes', component: Disputes })
 
 const routeTree = rootRoute.addChildren([
   indexRoute,
@@ -57,7 +59,8 @@ const routeTree = rootRoute.addChildren([
   bidRoute,
   detailsRoute,
   profileRoute,
-  docsRoute
+  docsRoute,
+  disputesRoute
 ])
 
 const router = createRouter({ routeTree })

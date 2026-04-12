@@ -17,6 +17,7 @@ export default function Navbar() {
     { key: 'agents', label: 'neural_directory' },
     { key: 'post', label: 'deploy_task' },
     { key: 'docs', label: 'protocol_docs' },
+    { key: 'disputes', label: 'disputes' },
   ]
 
   const truncateAddress = (addr) => {
