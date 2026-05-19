@@ -18,17 +18,42 @@ import { pool } from "../db";
 
 export const taskRoutes = new Hono();
 
-// ─── In-memory TaskSpec v2 store (replace with IPFS/DB in production) ──
-const taskSpecs: Map<string, any> = new Map();
-
-// ─── Store/Update Task Spec ────────────────────────────────────
+// ─── Store/Update Task Spec (Postgres-backed task_specs table) ──────
+// Keeps the API shape stable. Reject literal "null"/missing IDs explicitly so
+// we never silently collide specs again.
 taskRoutes.post("/:taskId/spec", async (c) => {
   const taskId = c.req.param("taskId");
+  if (!taskId || taskId === "null" || taskId === "undefined") {
+    return c.json({ error: "invalid taskId" }, 400);
+  }
   const spec = await c.req.json();
-
   spec.taskId = taskId;
   spec.version = "2.0";
-  taskSpecs.set(taskId, spec);
+
+  try {
+    await pool.query(
+      `INSERT INTO task_specs (task_id, repo_url, test_command, lint_command, runtime, env_vars, acceptance)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       ON CONFLICT (task_id) DO UPDATE SET
+         repo_url = EXCLUDED.repo_url,
+         test_command = EXCLUDED.test_command,
+         lint_command = EXCLUDED.lint_command,
+         runtime = EXCLUDED.runtime,
+         env_vars = EXCLUDED.env_vars,
+         acceptance = EXCLUDED.acceptance`,
+      [
+        taskId,
+        spec.repoUrl || spec.repo_url || null,
+        spec.testCommand || spec.test_command || null,
+        spec.lintCommand || spec.lint_command || null,
+        spec.runtime || null,
+        JSON.stringify(spec.envVars || spec.env_vars || {}),
+        JSON.stringify(spec.acceptance || spec),
+      ]
+    );
+  } catch (err: any) {
+    return c.json({ error: `Failed to store spec: ${err.message}` }, 500);
+  }
 
   return c.json({ success: true, taskId, message: "TaskSpec v2 stored" }, 201);
 });
@@ -36,9 +61,29 @@ taskRoutes.post("/:taskId/spec", async (c) => {
 // ─── Get Task Spec ─────────────────────────────────────────────
 taskRoutes.get("/:taskId/spec", async (c) => {
   const taskId = c.req.param("taskId");
-  const spec = taskSpecs.get(taskId);
 
-  if (spec) return c.json(spec);
+  try {
+    const { rows } = await pool.query(
+      "SELECT * FROM task_specs WHERE task_id = $1",
+      [taskId]
+    );
+    if (rows.length > 0) {
+      const r = rows[0];
+      const spec = {
+        taskId: r.task_id,
+        version: "2.0",
+        repoUrl: r.repo_url,
+        testCommand: r.test_command,
+        lintCommand: r.lint_command,
+        runtime: r.runtime,
+        envVars: r.env_vars,
+        acceptance: r.acceptance,
+      };
+      return c.json(spec);
+    }
+  } catch (err: any) {
+    console.warn(`[TASKS] spec read failed for ${taskId}: ${err.message}`);
+  }
 
   // Fallback: build a basic spec from on-chain data
   try {

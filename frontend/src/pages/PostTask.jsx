@@ -102,22 +102,41 @@ export default function PostTask() {
 
       const txHash = await walletClient.writeContract(request)
 
-      // 2. Dual update to backend to ensure DB mirrors block state cleanly
-      // We don't block on this failing
-      fetch('/api/v1/tasks/null/spec', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          title, category, description,
-          paymentModel,
-          paymentToken: TOKEN_ADDRESS,
-          baseReward: maxBudget,
-          txHash,
-          steps: chunks.map(c => ({ description: c.description, percentageBPS: c.percentageBPS })),
-        }),
-      }).catch(err => console.error("Dual update sync failed:", err))
+      // 2. Wait for the receipt and parse TaskPosted to learn the real taskId.
+      //    Without this we'd POST the spec under the literal string "null".
+      let realTaskId = null
+      try {
+        const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash })
+        // TaskPosted(bytes32 indexed taskId, address indexed poster, uint256 reward, uint8 model)
+        // viem returns logs already keyed to TASK_MANAGER_ABI; the first indexed topic (topics[1]) is taskId.
+        const log = receipt.logs.find(l => l.address?.toLowerCase() === TASK_MANAGER_ADDRESS.toLowerCase())
+        if (log && log.topics && log.topics[1]) {
+          realTaskId = log.topics[1] // already 0x-prefixed 32-byte hex
+        }
+      } catch (recErr) {
+        console.error("Failed to resolve taskId from receipt:", recErr)
+      }
 
-      setResult({ txHash })
+      // 3. Mirror the spec to the backend keyed by the real taskId.
+      if (realTaskId) {
+        fetch(`/api/v1/tasks/${realTaskId}/spec`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            title, category, description,
+            paymentModel,
+            paymentToken: TOKEN_ADDRESS,
+            baseReward: maxBudget,
+            txHash,
+            testCommand, lintCommand, runtime,
+            steps: chunks.map(c => ({ description: c.description, percentageBPS: c.percentageBPS })),
+          }),
+        }).catch(err => console.error("Dual update sync failed:", err))
+      } else {
+        console.warn("Skipping spec upload — could not extract taskId from receipt")
+      }
+
+      setResult({ txHash, taskId: realTaskId })
     } catch (err) {
       setResult({ error: err.message || err.toString() })
     }
