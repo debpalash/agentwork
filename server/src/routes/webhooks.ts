@@ -3,6 +3,7 @@
  */
 
 import { Hono } from "hono";
+import { createHmac, timingSafeEqual } from "crypto";
 import { verifySandbox } from "../services/sandbox";
 
 export const webhookRoutes = new Hono();
@@ -13,12 +14,31 @@ const taskSpecs: Map<string, any> = new Map(); // taskId → spec
 
 // ─── Forgejo Push Webhook ──────────────────────────────────────
 webhookRoutes.post("/push", async (c) => {
-  const body = await c.req.json();
+  // Read raw body BEFORE parsing JSON so the HMAC matches Forgejo's hash of the bytes.
+  const raw = await c.req.raw.clone().text();
 
-  // Verify webhook secret
-  const signature = c.req.header("X-Forgejo-Signature");
-  const expectedSecret = process.env.FORGEJO_WEBHOOK_SECRET || "aiwork-webhook-secret";
-  // TODO: verify HMAC-SHA256(body, secret) === signature
+  // ─── HMAC-SHA256 verification (Forgejo: X-Forgejo-Signature, hex digest) ────
+  const signature = c.req.header("X-Forgejo-Signature") || "";
+  const secret = process.env.FORGEJO_WEBHOOK_SECRET;
+  if (!secret) {
+    if (process.env.NODE_ENV === "production") {
+      console.error("[WEBHOOK] FORGEJO_WEBHOOK_SECRET unset in production — refusing request");
+      return c.json({ error: "webhook secret not configured" }, 500);
+    }
+    console.warn("[WEBHOOK] FORGEJO_WEBHOOK_SECRET unset — dev mode, skipping HMAC check");
+  } else {
+    const expected = createHmac("sha256", secret).update(raw).digest("hex");
+    const sigBuf = Buffer.from(signature, "hex");
+    const expBuf = Buffer.from(expected, "hex");
+    if (
+      sigBuf.length !== expBuf.length ||
+      !timingSafeEqual(sigBuf, expBuf)
+    ) {
+      return c.json({ error: "bad signature" }, 401);
+    }
+  }
+
+  const body = JSON.parse(raw);
 
   const repoName = body.repository?.name;
   const cloneUrl = body.repository?.clone_url;
