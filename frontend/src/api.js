@@ -4,7 +4,11 @@
  */
 
 const API_BASE = '/api/v1';
-const DEV_API_KEY = 'aiwork-dev-key-001'; // For development; production uses wallet signatures
+// Read API key from Vite env. In dev (mode !== 'production') fall back to the
+// well-known local key so devs don't have to set anything. In production this
+// must be set explicitly via VITE_AIWORK_API_KEY at build time.
+const API_KEY = import.meta.env.VITE_AIWORK_API_KEY
+  || (import.meta.env.MODE !== 'production' ? 'aiwork-dev-key-001' : '');
 
 async function apiFetch(path, options = {}) {
   try {
@@ -13,9 +17,9 @@ async function apiFetch(path, options = {}) {
       ...options.headers,
     };
 
-    // For write operations, add API key auth
-    if (options.method && options.method !== 'GET') {
-      headers['Authorization'] = `Bearer ${DEV_API_KEY}`;
+    // For write operations, add API key auth (when one is configured)
+    if (options.method && options.method !== 'GET' && API_KEY) {
+      headers['Authorization'] = `Bearer ${API_KEY}`;
     }
 
     const res = await fetch(`${API_BASE}${path}`, {

@@ -207,8 +207,10 @@ export async function corsMiddleware(c: Context, next: Next) {
   if (origin && ALLOWED_ORIGINS.has(origin)) {
     c.header("Access-Control-Allow-Origin", origin);
   } else if (!origin) {
-    // Allow non-browser requests (CLI, curl)
-    c.header("Access-Control-Allow-Origin", "*");
+    // No Origin header → likely a non-browser client (CLI, curl, server-to-server).
+    // Do NOT emit Access-Control-Allow-Origin: * — that previously let any browser
+    // page in any tab issue authenticated cross-origin requests against us.
+    // Non-browser clients ignore CORS headers, so they're unaffected.
   } else {
     // Unknown origin — block
     return c.json({ error: "CORS: origin not allowed" }, 403);

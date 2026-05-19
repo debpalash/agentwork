@@ -7,9 +7,19 @@ import { verifyMessage } from "viem";
 // 2. Legacy env-based keys — for backwards compatibility
 // ───────────────────────────────────────────────────────────────
 
-const LEGACY_API_KEYS = new Set(
-  (process.env.API_KEYS || "aiwork-dev-key-001").split(",").map((k) => k.trim())
-);
+// Legacy/dev API keys. In production we REFUSE to fall back to the dev key;
+// keys must come from the API_KEYS env var (and ideally the DB-backed table).
+const LEGACY_API_KEYS = (() => {
+  const fromEnv = (process.env.API_KEYS || "").split(",").map((k) => k.trim()).filter(Boolean);
+  if (fromEnv.length > 0) return new Set(fromEnv);
+  if (process.env.NODE_ENV === "production") {
+    throw new Error(
+      "[AUTH] No API_KEYS configured in production. Set API_KEYS or seed DB-backed keys before starting."
+    );
+  }
+  console.warn("[AUTH] Using DEV-ONLY fallback API key 'aiwork-dev-key-001' — never deploy this to production");
+  return new Set(["aiwork-dev-key-001"]);
+})();
 
 /**
  * Auth middleware for protected routes.
