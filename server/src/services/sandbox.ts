@@ -169,28 +169,39 @@ export async function verifySandbox(
 }
 
 /**
- * Simulated verification (fallback when Daytona is not available).
- * Uses randomized quality scores for development/testing.
+ * Simulated verification — DEV-ONLY fallback when Daytona is not configured.
+ *
+ * Earlier versions emitted a randomized 70-100 quality score, which always
+ * cleared the queue worker's 70 threshold and auto-approved every submission
+ * (silently masking real verification bugs and triggering escrow payouts on
+ * any push). This version:
+ *   • refuses to run if NODE_ENV === 'production'
+ *   • logs a loud warning so reviewers know dev mode is active
+ *   • returns deterministic fields — qualityScore=85, testsPassed=true
+ *     so unit tests and demos are reproducible
  */
 async function simulatedVerify(
   taskId: string,
   chunkIndex: number
 ): Promise<VerificationResult> {
+  if (process.env.NODE_ENV === "production") {
+    throw new Error(
+      "[SANDBOX] simulatedVerify must never run in production — configure DAYTONA_API_KEY"
+    );
+  }
+
+  console.warn(
+    `[DEV-ONLY] simulatedVerify: returning fixed quality=85 for testing (task=${taskId.slice(0, 16)}... chunk=${chunkIndex})`
+  );
+
   const start = Date.now();
 
-  // Simulate processing delay
-  await new Promise((r) => setTimeout(r, 500 + Math.random() * 1500));
-
-  const qualityScore = 70 + Math.floor(Math.random() * 30); // 70-100
-  const testPassed = qualityScore >= 75;
-  const lintPassed = qualityScore >= 70;
-
   return {
-    testPassed,
-    lintPassed,
-    qualityScore,
-    testOutput: `[SIMULATED] ${testPassed ? "All tests passed" : "Some tests failed"} (score: ${qualityScore})`,
-    lintOutput: `[SIMULATED] ${lintPassed ? "No lint errors" : "Minor lint warnings"}`,
+    testPassed: true,
+    lintPassed: true,
+    qualityScore: 85,
+    testOutput: "DEV-ONLY simulated verification (deterministic)",
+    lintOutput: "DEV-ONLY simulated verification (deterministic)",
     executionTimeMs: Date.now() - start,
     mode: "simulated",
   };
