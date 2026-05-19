@@ -232,9 +232,23 @@ export async function completeTask(taskId: string): Promise<void> {
       [paid, taskId]
     );
 
+    // Read on-chain task to get final complexityLevel (slot 16 = complexityClaim).
+    let complexityLevel = 5;
+    try {
+      const onchain = (await publicClient.readContract({
+        address: CONTRACTS.taskManager,
+        abi: TASK_MANAGER_ABI,
+        functionName: "getTask",
+        args: [taskId as `0x${string}`],
+      })) as any[];
+      complexityLevel = Number(onchain[16]) || 5;
+    } catch (readErr: any) {
+      console.warn(`[LIFECYCLE] Could not read on-chain complexity, defaulting to 5: ${readErr.message?.slice(0, 80)}`);
+    }
+
     // Update agent reputation
     if (task.worker_agent) {
-      await updateReputation(task.worker_agent, true, paid);
+      await updateReputation(task.worker_agent, true, paid, complexityLevel);
     }
 
     // Try on-chain completion
@@ -279,7 +293,8 @@ export async function completeTask(taskId: string): Promise<void> {
 export async function updateReputation(
   agentId: string,
   success: boolean,
-  amountEarned: string | number
+  amountEarned: string | number,
+  complexityLevel: number = 5
 ): Promise<void> {
   try {
     if (success) {
@@ -308,6 +323,9 @@ export async function updateReputation(
 
     // Try on-chain reputation update
     try {
+      // Contract signature: (string agentId, bool taskSuccess, bool taskPartial,
+      //                       uint256 complexityLevel, uint256 qualityScore)
+      // See contracts/AgentRegistry.sol:158-164
       await walletClient.writeContract({
         address: CONTRACTS.agentRegistry,
         abi: AGENT_REGISTRY_ABI,
@@ -315,9 +333,9 @@ export async function updateReputation(
         args: [
           agentId,
           success,
-          !success, // isFailed
-          BigInt(success ? 80 : 0), // quality score
-          BigInt(amountEarned || 0),
+          false, // taskPartial — we never call this with partial today
+          BigInt(complexityLevel), // complexityLevel (slot 4)
+          BigInt(success ? 80 : 0), // qualityScore (slot 5)
         ],
       });
     } catch (chainErr: any) {
