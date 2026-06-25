@@ -93,7 +93,7 @@ export async function awardTask(taskId: string): Promise<{
       type: "award",
       agent: bestBid.agent_id,
       taskId,
-      message: `Task awarded to ${bestBid.agent_id} at ${bestBid.bid_price} AIWK (score: ${Math.round(bestScore)})`,
+      message: `Task awarded to ${bestBid.agent_id} at ${bestBid.bid_price} USDC (score: ${Math.round(bestScore)})`,
     });
 
     // Insert notification row for the agent to poll
@@ -149,66 +149,14 @@ export async function submitStep(
 }
 
 // ═══════════════════════════════════════════════════════════════
-// 3. VERIFY — Check submitted work and approve/reject
+// 3. VERIFY
+// ───────────────────────────────────────────────────────────────
+// REMOVED: the former `verifyStep()` here auto-approved every chunk with a
+// random 70–100 score (no tests run) and, since it was exported, was one wire-up
+// away from silently paying for unverified work. The ONLY verification path is
+// the queue worker in services/queue.ts, which runs the real sandbox check
+// (services/sandbox.ts) and gates on VERIFICATION_PASS_THRESHOLD.
 // ═══════════════════════════════════════════════════════════════
-export async function verifyStep(
-  taskId: string,
-  chunkIndex: number
-): Promise<boolean> {
-  try {
-    // In production: spin up Daytona sandbox, run tests, check lint
-    // For now: auto-approve with a quality check simulation
-    const qualityScore = 70 + Math.floor(Math.random() * 30); // 70-100
-
-    // Record verification
-    await pool.query(
-      `INSERT INTO verification_jobs (task_id, chunk_index, status, test_passed, lint_passed, quality_score, completed_at, created_at)
-       VALUES ($1, $2, 'COMPLETED', true, true, $3, NOW(), NOW())
-       ON CONFLICT DO NOTHING`,
-      [taskId, chunkIndex, qualityScore]
-    );
-
-    // Mark chunk as verified
-    await pool.query(
-      `UPDATE chunks SET verified = true, verified_at = NOW(), quality_score = $1
-       WHERE task_id = $2 AND chunk_index = $3`,
-      [qualityScore, taskId, chunkIndex]
-    );
-
-    // Update task verified_chunks count
-    await pool.query(
-      `UPDATE tasks SET verified_chunks = verified_chunks + 1, updated_at = NOW() WHERE task_id = $1`,
-      [taskId]
-    );
-
-    // Check if all chunks verified → complete task
-    const { rows } = await pool.query(
-      "SELECT total_chunks, verified_chunks FROM tasks WHERE task_id = $1",
-      [taskId]
-    );
-
-    if (rows.length > 0 && rows[0].verified_chunks >= rows[0].total_chunks && rows[0].total_chunks > 0) {
-      await completeTask(taskId);
-    }
-
-    // Try on-chain verification
-    try {
-      await walletClient.writeContract({
-        address: CONTRACTS.taskManager,
-        abi: TASK_MANAGER_ABI,
-        functionName: "verifyStep",
-        args: [taskId as `0x${string}`, BigInt(chunkIndex), true, BigInt(qualityScore)],
-      });
-    } catch (chainErr: any) {
-      console.warn(`[LIFECYCLE] On-chain verify failed (non-critical): ${chainErr.message?.slice(0, 80)}`);
-    }
-
-    return true;
-  } catch (err: any) {
-    console.error(`[LIFECYCLE] Verify failed: ${err.message}`);
-    return false;
-  }
-}
 
 // ═══════════════════════════════════════════════════════════════
 // 4. COMPLETE — All chunks verified, release payment
@@ -268,7 +216,7 @@ export async function completeTask(taskId: string): Promise<void> {
       type: "pay",
       agent: task.worker_agent,
       taskId,
-      message: `Task completed! ${paid} AIWK released to ${task.worker_agent}`,
+      message: `Task completed! ${paid} USDC released to ${task.worker_agent}`,
     });
 
     // Notify agent of payment
@@ -278,7 +226,7 @@ export async function completeTask(taskId: string): Promise<void> {
       [
         task.worker_agent,
         taskId,
-        `Payment received: ${paid} AIWK for task ${taskId.slice(0, 16)}...`,
+        `Payment received: ${paid} USDC for task ${taskId.slice(0, 16)}...`,
         JSON.stringify({ action: "PAYMENT_RELEASED", amount: paid }),
       ]
     );
@@ -346,7 +294,7 @@ export async function updateReputation(
       type: success ? "verify" : "fail",
       agent: agentId,
       message: success
-        ? `Reputation +200 for ${agentId} (earned ${amountEarned} AIWK)`
+        ? `Reputation +200 for ${agentId} (earned ${amountEarned} USDC)`
         : `Reputation -500 for ${agentId} (task failed)`,
     });
   } catch (err: any) {

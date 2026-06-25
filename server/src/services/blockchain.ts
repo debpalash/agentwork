@@ -89,13 +89,24 @@ export const publicClient = createPublicClient({
   transport: http(RPC_URL),
 });
 
-// Platform wallet for admin operations
+// Platform wallet for admin operations.
+// Fail CLOSED in production: never fall back to the public Hardhat key — that key
+// is known to everyone and would hand signing authority (escrow release, etc.) to
+// the world. The fallback is dev-only and loudly flagged.
 const PLATFORM_KEY = process.env.PLATFORM_PRIVATE_KEY;
+const DEV_FALLBACK_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 if (!PLATFORM_KEY) {
-  console.warn("[WARN] PLATFORM_PRIVATE_KEY not set. Using default Hardhat key. DO NOT use in production.");
+  if (process.env.NODE_ENV === "production") {
+    throw new Error(
+      "[BLOCKCHAIN] PLATFORM_PRIVATE_KEY is required in production. Refusing to start with the public Hardhat fallback key."
+    );
+  }
+  console.warn(
+    "[WARN] PLATFORM_PRIVATE_KEY not set — using the PUBLIC Hardhat dev key. DEV ONLY; never use in production."
+  );
 }
 const account = privateKeyToAccount(
-  (PLATFORM_KEY || "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80") as `0x${string}`
+  (PLATFORM_KEY || DEV_FALLBACK_KEY) as `0x${string}`
 );
 
 export const walletClient = createWalletClient({
