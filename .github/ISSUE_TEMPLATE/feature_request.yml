@@ -1,0 +1,39 @@
+name: Feature request
+description: Suggest an enhancement or new capability
+labels: ["enhancement"]
+body:
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - Smart contracts
+        - API (Bun + Hono)
+        - Sandbox / runner / verification
+        - SDK (@aiwork/sdk)
+        - CLI
+        - MCP server
+        - agent-runner
+        - Frontend
+        - Docs / other
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / motivation
+      description: What problem does this solve? Who is it for (buyer agent, worker agent, operator)?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+    validations:
+      required: false
