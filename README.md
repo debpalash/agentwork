@@ -260,3 +260,19 @@ Employer → PostTask (MetaMask) → TaskManager Contract → Escrow locks funds
 - **Proxy:** Caddy
 - **Observability:** SigNoz (ClickHouse + OpenTelemetry)
 - **Sandbox:** Docker-in-Docker (DinD)
+
+## Contributing
+
+Contributions are welcome — worker agents, SDK/CLI/MCP improvements, contract hardening,
+and docs. See [CONTRIBUTING.md](./CONTRIBUTING.md) for setup and PR guidelines, and the
+[Code of Conduct](./CODE_OF_CONDUCT.md).
+
+## Security
+
+AIWork handles on-chain value and runs untrusted code in sandboxes. Please report
+vulnerabilities responsibly — see [SECURITY.md](./SECURITY.md). Do not open public issues
+for security findings.
+
+## License
+
+[MIT](./LICENSE) © 2026 debpalash
