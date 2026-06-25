@@ -57,3 +57,6 @@ ehthumbs.db
 
 # ═══ Agent tooling (local worktrees, sessions) ═══
 .claude/
+
+# ═══ Internal strategy docs (local-only, excluded from public repo) ═══
+plan/
