@@ -380,6 +380,34 @@ describe("AIWork Platform", function () {
       const expectedRefund = amount - (amount * 100n) / 10000n;
       expect(posterAfter - posterBefore).to.equal(expectedRefund);
     });
+
+    it("cancelAndRefund should refund (regression: no self-call role failure)", async function () {
+      const taskId = ethers.keccak256(ethers.toUtf8Bytes("escrow-task-cancel"));
+      const amount = ethers.parseEther("1000");
+
+      await mockUSDC
+        .connect(poster)
+        .approve(await escrowVault.getAddress(), amount);
+      await escrowVault.lockFunds(
+        taskId,
+        poster.address,
+        await mockUSDC.getAddress(),
+        amount
+      );
+
+      const posterBefore = await mockUSDC.balanceOf(poster.address);
+      // Previously cancelAndRefund did `this.refundPoster()`, making msg.sender
+      // the vault (which lacks PLATFORM_ROLE) → it always reverted and stranded
+      // the escrow. This must succeed and refund the poster (minus cancel fee).
+      await escrowVault.cancelAndRefund(taskId);
+      const posterAfter = await mockUSDC.balanceOf(poster.address);
+
+      const expectedRefund = amount - (amount * 100n) / 10000n;
+      expect(posterAfter - posterBefore).to.equal(expectedRefund);
+
+      const escrow = await escrowVault.getEscrow(taskId);
+      expect(escrow.isActive).to.be.false;
+    });
   });
 
   // ═══════════════════════════════════════════════════════════════
