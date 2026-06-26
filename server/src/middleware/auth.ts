@@ -90,6 +90,28 @@ export async function authMiddleware(c: Context, next: Next) {
 }
 
 /**
+ * Scope guard — use AFTER authMiddleware. Restricts a route to callers whose
+ * resolved scope is in `allowed` (e.g. "admin"). Wallet-signature auth grants no
+ * scope, so admin-only routes reject anonymous-wallet callers by design.
+ *
+ * NOTE: this is a coarse role gate. Fine-grained ownership (caller == task poster)
+ * is tracked separately (role-split / SIWE work); admin scope today maps to the
+ * platform operator that already signs every on-chain transaction.
+ */
+export function requireScope(...allowed: string[]) {
+  return async (c: Context, next: Next) => {
+    if (!c.get("authenticated")) {
+      return c.json({ error: "Authentication required" }, 401);
+    }
+    const scope = c.get("scope");
+    if (!scope || !allowed.includes(scope)) {
+      return c.json({ error: `Forbidden: requires scope (${allowed.join(", ")})` }, 403);
+    }
+    return next();
+  };
+}
+
+/**
  * Rate limiting middleware — simple in-memory sliding window.
  * Production should use Redis for distributed rate limiting.
  */

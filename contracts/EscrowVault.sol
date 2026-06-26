@@ -4,6 +4,7 @@ pragma solidity ^0.8.24;
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/access/AccessControl.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 /**
  * @title EscrowVault
@@ -11,7 +12,7 @@ import "@openzeppelin/contracts/access/AccessControl.sol";
  *         Supports full release, step-based release, quality adjustments,
  *         platform bonus injection, auto-approval after timeout, and refunds.
  */
-contract EscrowVault is AccessControl {
+contract EscrowVault is AccessControl, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     bytes32 public constant PLATFORM_ROLE = keccak256("PLATFORM_ROLE");
@@ -222,7 +223,20 @@ contract EscrowVault is AccessControl {
     // ─── Refund Poster ─────────────────────────────────────────────
     function refundPoster(
         bytes32 taskId
-    ) external onlyRole(PLATFORM_ROLE) {
+    ) external onlyRole(PLATFORM_ROLE) nonReentrant {
+        _refundPoster(taskId);
+    }
+
+    /// @notice Alias for refundPoster — used on cancellation paths.
+    function cancelAndRefund(bytes32 taskId) external onlyRole(PLATFORM_ROLE) nonReentrant {
+        _refundPoster(taskId);
+    }
+
+    /// @dev Shared refund logic. Internal so callers within this contract
+    ///      (e.g. cancelAndRefund) do not re-enter via `this.` — which would
+    ///      run as msg.sender == address(this), failing the PLATFORM_ROLE check
+    ///      and permanently stranding escrowed funds.
+    function _refundPoster(bytes32 taskId) internal {
         EscrowAccount storage esc = escrows[taskId];
         if (!esc.isActive) revert NoActiveEscrow();
 
@@ -239,11 +253,6 @@ contract EscrowVault is AccessControl {
         esc.paymentToken.safeTransfer(treasury, cancelFee);
 
         emit FundsRefunded(taskId, esc.poster, refund);
-    }
-
-    /// @notice Alias for refundPoster — used by TaskManagerV2 on cancellation
-    function cancelAndRefund(bytes32 taskId) external onlyRole(PLATFORM_ROLE) {
-        this.refundPoster(taskId);
     }
 
     // ─── Quality Adjustment ────────────────────────────────────────

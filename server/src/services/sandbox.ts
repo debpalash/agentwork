@@ -18,6 +18,7 @@
  */
 
 import { pool } from "../db";
+import { VERIFICATION_PASS_THRESHOLD } from "../constants";
 
 // ─── Config ────────────────────────────────────────────────────
 const DAYTONA_API_KEY = process.env.DAYTONA_API_KEY || "";
@@ -223,7 +224,7 @@ export async function recordVerification(
     [
       taskId,
       chunkIndex,
-      result.qualityScore >= 70 ? "COMPLETED" : "FAILED",
+      result.qualityScore >= VERIFICATION_PASS_THRESHOLD ? "COMPLETED" : "FAILED",
       result.testPassed,
       result.lintPassed,
       result.qualityScore,

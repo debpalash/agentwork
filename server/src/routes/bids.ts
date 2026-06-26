@@ -70,7 +70,7 @@ bidRoutes.post("/:taskId", authMiddleware, async (c) => {
     await insertActivity({
       type: "bid",
       agent: agentAddress.slice(0, 10) + "...",
-      message: `bid ${amount} AIWK on task ${taskId.slice(0, 10)}...`,
+      message: `bid ${amount} USDC on task ${taskId.slice(0, 10)}...`,
       taskId,
       txHash,
     });

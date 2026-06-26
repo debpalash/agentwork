@@ -17,6 +17,7 @@ import {
   updateReputation,
 } from "./lifecycle";
 import { pool, insertActivity } from "../db";
+import { VERIFICATION_PASS_THRESHOLD } from "../constants";
 
 // ─── Queue Definitions ─────────────────────────────────────────
 const EMBEDDED = { embedded: true };
@@ -78,7 +79,7 @@ const verificationWorker = new Worker(
     await recordVerification(taskId, chunkIndex, result);
 
     // Mark chunk verified if quality OK
-    const verified = result.qualityScore >= 70;
+    const verified = result.qualityScore >= VERIFICATION_PASS_THRESHOLD;
     if (verified) {
       await pool.query(
         `UPDATE chunks SET verified = true, verified_at = NOW(), quality_score = $1

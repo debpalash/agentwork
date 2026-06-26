@@ -15,13 +15,20 @@ import {
 } from "../services/lifecycle";
 import { keccak256, toHex, parseEther } from "viem";
 import { pool } from "../db";
+import { authMiddleware, requireScope } from "../middleware/auth";
 
 export const taskRoutes = new Hono();
+
+// Authorization note: every mutating route below is gated. Money-movement and
+// platform operations (verify/complete-verify/assign/award/cancel, and the
+// verification spec that drives payout) require `admin` scope — matching the
+// platform key that signs these on-chain calls today. Worker/create actions
+// require authentication. GET routes stay public (read-only).
 
 // ─── Store/Update Task Spec (Postgres-backed task_specs table) ──────
 // Keeps the API shape stable. Reject literal "null"/missing IDs explicitly so
 // we never silently collide specs again.
-taskRoutes.post("/:taskId/spec", async (c) => {
+taskRoutes.post("/:taskId/spec", authMiddleware, requireScope("admin"), async (c) => {
   const taskId = c.req.param("taskId");
   if (!taskId || taskId === "null" || taskId === "undefined") {
     return c.json({ error: "invalid taskId" }, 400);
@@ -124,7 +131,7 @@ taskRoutes.get("/:taskId/spec", async (c) => {
 });
 
 // ─── Post a New Task ───────────────────────────────────────────
-taskRoutes.post("/", async (c) => {
+taskRoutes.post("/", authMiddleware, async (c) => {
   const body = await c.req.json();
   const {
     title,
@@ -260,7 +267,7 @@ taskRoutes.get("/:taskId", async (c) => {
 });
 
 // ─── Assign Agent to Task ──────────────────────────────────────
-taskRoutes.post("/:taskId/assign", async (c) => {
+taskRoutes.post("/:taskId/assign", authMiddleware, requireScope("admin"), async (c) => {
   const taskId = c.req.param("taskId") as `0x${string}`;
   const { agentId } = await c.req.json();
 
@@ -279,7 +286,7 @@ taskRoutes.post("/:taskId/assign", async (c) => {
 });
 
 // ─── Submit Step ───────────────────────────────────────────────
-taskRoutes.post("/:taskId/steps/:stepNum/submit", async (c) => {
+taskRoutes.post("/:taskId/steps/:stepNum/submit", authMiddleware, async (c) => {
   const taskId = c.req.param("taskId") as `0x${string}`;
   const stepNum = Number(c.req.param("stepNum"));
   const { deliverable } = await c.req.json();
@@ -301,7 +308,7 @@ taskRoutes.post("/:taskId/steps/:stepNum/submit", async (c) => {
 });
 
 // ─── Verify Step ───────────────────────────────────────────────
-taskRoutes.post("/:taskId/steps/:stepNum/verify", async (c) => {
+taskRoutes.post("/:taskId/steps/:stepNum/verify", authMiddleware, requireScope("admin"), async (c) => {
   const taskId = c.req.param("taskId") as `0x${string}`;
   const stepNum = Number(c.req.param("stepNum"));
   const { approved, qualityScore } = await c.req.json();
@@ -321,7 +328,7 @@ taskRoutes.post("/:taskId/steps/:stepNum/verify", async (c) => {
 });
 
 // ─── Submit Full Completion ────────────────────────────────────
-taskRoutes.post("/:taskId/complete", async (c) => {
+taskRoutes.post("/:taskId/complete", authMiddleware, async (c) => {
   const taskId = c.req.param("taskId") as `0x${string}`;
   const { deliverable } = await c.req.json();
 
@@ -342,7 +349,7 @@ taskRoutes.post("/:taskId/complete", async (c) => {
 });
 
 // ─── Verify Full Completion ────────────────────────────────────
-taskRoutes.post("/:taskId/verify", async (c) => {
+taskRoutes.post("/:taskId/verify", authMiddleware, requireScope("admin"), async (c) => {
   const taskId = c.req.param("taskId") as `0x${string}`;
   const { approved, qualityScore } = await c.req.json();
 
@@ -361,7 +368,7 @@ taskRoutes.post("/:taskId/verify", async (c) => {
 });
 
 // ─── Cancel Task ───────────────────────────────────────────────
-taskRoutes.post("/:taskId/cancel", async (c) => {
+taskRoutes.post("/:taskId/cancel", authMiddleware, requireScope("admin"), async (c) => {
   const taskId = c.req.param("taskId") as `0x${string}`;
 
   try {
@@ -481,7 +488,7 @@ function resolveAgent(rows: any[], taskData: any[]) {
 // ═══════════════════════════════════════════════════════════════
 // LIFECYCLE: Award Task — close bidding, select winner
 // ═══════════════════════════════════════════════════════════════
-taskRoutes.post("/:taskId/award", async (c) => {
+taskRoutes.post("/:taskId/award", authMiddleware, requireScope("admin"), async (c) => {
   const taskId = c.req.param("taskId");
 
   const result = await awardTask(taskId);
@@ -501,7 +508,7 @@ taskRoutes.post("/:taskId/award", async (c) => {
 // ═══════════════════════════════════════════════════════════════
 // LIFECYCLE: Submit Step — agent submits deliverable
 // ═══════════════════════════════════════════════════════════════
-taskRoutes.post("/:taskId/submit", async (c) => {
+taskRoutes.post("/:taskId/submit", authMiddleware, async (c) => {
   const taskId = c.req.param("taskId");
   const body = await c.req.json();
   const { chunkIndex, agentId, commitHash } = body;
