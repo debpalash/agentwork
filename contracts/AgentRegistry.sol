@@ -2,6 +2,8 @@
 pragma solidity ^0.8.24;
 
 import "@openzeppelin/contracts/access/AccessControl.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "./AIWorkToken.sol";
 
 /**
@@ -13,7 +15,8 @@ import "./AIWorkToken.sol";
  *         Tracks reputation (0-10000 BPS), skills, staking tiers,
  *         and performance metrics.
  */
-contract AgentRegistry is AccessControl {
+contract AgentRegistry is AccessControl, ReentrancyGuard {
+    using SafeERC20 for AIWorkToken;
     bytes32 public constant PLATFORM_ROLE = keccak256("PLATFORM_ROLE");
 
     // ─── Agent Categories ──────────────────────────────────────────
@@ -62,6 +65,7 @@ contract AgentRegistry is AccessControl {
     mapping(address => string) public addressToAgentId;
     mapping(AgentCategory => uint256) public categoryCount;
     mapping(string => string[]) public agentSkills;       // agentId => skills
+    mapping(string => uint256) public lastStakeAt;
 
     uint256 public totalAgents;
     AIWorkToken public token;
@@ -71,6 +75,8 @@ contract AgentRegistry is AccessControl {
     uint256 public constant TIER1_STAKE = 500 * 10 ** 18;      // Priority matching
     uint256 public constant TIER2_STAKE = 2_000 * 10 ** 18;    // Exclusive tasks
     uint256 public constant TIER3_STAKE = 10_000 * 10 ** 18;   // Enterprise tasks
+    uint256 public constant UNSTAKE_COOLDOWN = 7 days;
+    uint256 public constant MAX_COMPLEXITY = 15;
 
     // Reputation thresholds (BPS) by complexity range
     uint256 public constant REP_THRESHOLD_LOW = 2000;      // Complexity 1-5
@@ -91,6 +97,8 @@ contract AgentRegistry is AccessControl {
     error AgentNotFound();
     error AgentNotActive();
     error InsufficientReputation(uint256 required, uint256 actual);
+    error InvalidAgentAddress();
+    error UnstakeCooldownActive();
 
     constructor(address _token) {
         token = AIWorkToken(_token);
@@ -105,6 +113,7 @@ contract AgentRegistry is AccessControl {
         AgentCategory _category,
         string[] calldata _skills
     ) external onlyRole(PLATFORM_ROLE) returns (string memory agentId) {
+        if (_walletAddress == address(0) || _paymentAddress == address(0)) revert InvalidAgentAddress();
         if (bytes(addressToAgentId[_walletAddress]).length != 0)
             revert AddressAlreadyRegistered();
 
@@ -138,7 +147,6 @@ contract AgentRegistry is AccessControl {
     ) external onlyRole(PLATFORM_ROLE) {
         AgentProfile storage agent = agents[agentId];
         if (agent.walletAddress == address(0)) revert AgentNotFound();
-
         AgentStatus old = agent.status;
         agent.status = AgentStatus.ACTIVE;
         agent.isVerified = true;
@@ -164,6 +172,10 @@ contract AgentRegistry is AccessControl {
     ) external onlyRole(PLATFORM_ROLE) {
         AgentProfile storage agent = agents[agentId];
         if (agent.walletAddress == address(0)) revert AgentNotFound();
+        // Zero represents an assessment that is not yet available; values
+        // above the protocol maximum are never valid.
+        require(complexityLevel <= MAX_COMPLEXITY, "Invalid complexity");
+        require(qualityScore <= 100, "Invalid quality");
 
         uint256 oldScore = agent.reputationScore;
         int256 delta;
@@ -206,25 +218,29 @@ contract AgentRegistry is AccessControl {
     }
 
     // ─── Staking ───────────────────────────────────────────────────
-    function stake(string calldata agentId, uint256 amount) external {
+    function stake(string calldata agentId, uint256 amount) external nonReentrant {
         AgentProfile storage agent = agents[agentId];
         if (agent.walletAddress == address(0)) revert AgentNotFound();
         require(msg.sender == agent.walletAddress, "Not agent owner");
+        require(amount > 0, "Zero stake");
 
-        token.transferFrom(msg.sender, address(this), amount);
+        token.safeTransferFrom(msg.sender, address(this), amount);
         agent.stakedAmount += amount;
+        lastStakeAt[agentId] = block.timestamp;
 
         emit AgentStaked(agentId, amount, agent.stakedAmount);
     }
 
-    function unstake(string calldata agentId, uint256 amount) external {
+    function unstake(string calldata agentId, uint256 amount) external nonReentrant {
         AgentProfile storage agent = agents[agentId];
         if (agent.walletAddress == address(0)) revert AgentNotFound();
         require(msg.sender == agent.walletAddress, "Not agent owner");
+        require(amount > 0, "Zero unstake");
         require(agent.stakedAmount >= amount, "Insufficient stake");
+        if (block.timestamp < lastStakeAt[agentId] + UNSTAKE_COOLDOWN) revert UnstakeCooldownActive();
 
         agent.stakedAmount -= amount;
-        token.transfer(msg.sender, amount);
+        token.safeTransfer(msg.sender, amount);
 
         emit AgentUnstaked(agentId, amount, agent.stakedAmount);
     }

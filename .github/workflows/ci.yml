@@ -1,4 +1,4 @@
-name: AIWork CI
+name: Collagent CI
 
 on:
   push:
@@ -7,6 +7,25 @@ on:
     branches: [main]
 
 jobs:
+  supply-chain:
+    name: Dependency Security
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+      - run: bun install --frozen-lockfile
+      - name: Reject known production vulnerabilities
+        run: |
+          bun audit --production
+          cd server
+          bun install --frozen-lockfile
+          bun audit --production
+          cd ../frontend
+          bun install --frozen-lockfile
+          bun audit --production
+
   contracts:
     name: Smart Contracts
     runs-on: ubuntu-latest
@@ -16,10 +35,10 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: 1.4.0
 
       - name: Install dependencies
-        run: bun install
+        run: cd server && bun install --frozen-lockfile
 
       - name: Compile contracts
         run: bunx hardhat compile
@@ -36,13 +55,64 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: 1.4.0
 
       - name: Install dependencies
-        run: cd server && bun install
+        run: bun install --frozen-lockfile
 
       - name: Type check + build
-        run: cd server && bun build src/index.ts --target=bun --outdir=dist
+        run: |
+          cd server
+          bunx tsc --noEmit
+          bun build src/index.ts --target=bun --outdir=dist
+          bun build src/worker.ts --target=bun --outdir=dist-worker
+
+  protocol-integration:
+    name: Problem Protocol & Biomedical Gates
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_DB: aiwork
+          POSTGRES_USER: aiwork
+          POSTGRES_PASSWORD: integration-only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U aiwork"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+      - run: bun install --frozen-lockfile
+      - run: cd server && bun install --frozen-lockfile
+      - name: Initialize integration database
+        env:
+          PGPASSWORD: integration-only
+        run: psql -h 127.0.0.1 -U aiwork -d aiwork -f docker/init.sql
+      - name: Start API and run synthetic protocol pilots
+        env:
+          DATABASE_URL: postgres://aiwork:integration-only@127.0.0.1:5432/aiwork
+          API_ORIGIN: http://127.0.0.1:3001
+          AUTH_ALLOWED_ORIGINS: http://127.0.0.1:3001
+          CHAIN_ID: 31337
+          WORKER_QUEUES: ""
+        run: |
+          bun run server/src/index.ts > /tmp/aiwork-api.log 2>&1 &
+          WORKER_QUEUES=notifications bun run server/src/worker.ts > /tmp/aiwork-worker.log 2>&1 &
+          for attempt in $(seq 1 30); do
+            curl --fail --silent http://127.0.0.1:3001/api >/dev/null && break
+            sleep 1
+          done
+          curl --fail http://127.0.0.1:3001/api
+          bun run server/test/problem-protocol-api.ts
+          bun run server/test/biomedical-governance.ts
+          WORKER_QUEUES= bun run server/test/durable-queue.ts
 
   frontend:
     name: Frontend
@@ -53,13 +123,13 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: 1.4.0
 
       - name: Install dependencies
-        run: cd frontend && bun install
+        run: cd frontend && bun install --frozen-lockfile
 
-      - name: Build
-        run: cd frontend && bun run build
+      - name: Type check, test, and build
+        run: cd frontend && bun run check
 
   sdk:
     name: SDK & Agent Runner
@@ -70,16 +140,19 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: 1.4.0
 
       - name: Install workspace deps
-        run: bun install
+        run: bun install --frozen-lockfile
 
       - name: Build SDK
-        run: cd packages/sdk && bun build src/index.ts --outdir=dist --target=node
+        run: cd packages/sdk && bunx tsc --noEmit && bun run build
 
       - name: Build Agent Runner
-        run: cd packages/agent-runner && bun build src/index.ts --outdir=dist --target=node
+        run: cd packages/agent-runner && bunx tsc --noEmit && bun run build
+
+      - name: Build MCP Server
+        run: cd packages/mcp-server && bunx tsc --noEmit && bun build src/index.ts --outdir=dist --target=node
 
   cli:
     name: CLI
@@ -90,10 +163,10 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: 1.4.0
 
       - name: Install workspace deps
-        run: bun install
+        run: bun install --frozen-lockfile
 
       - name: Verify CLI
-        run: cd cli && bun run index.ts --help
+        run: cd cli && bunx tsc --noEmit && bun run index.ts --help

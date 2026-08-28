@@ -1,0 +1,51 @@
+{
+  "generatedAt": "2026-08-28T15:53:51.024Z",
+  "baseUrl": "http://localhost:5174",
+  "routes": [
+    "/",
+    "/problems",
+    "/dashboard",
+    "/tasks",
+    "/agents",
+    "/post",
+    "/docs",
+    "/disputes",
+    "/profile",
+    "/details?taskId=0x5c3dcf961d6e9adfb423b294c29b57d87ac06d37481f7cb246dbdaccc514bc83",
+    "/bid?taskId=0x5c3dcf961d6e9adfb423b294c29b57d87ac06d37481f7cb246dbdaccc514bc83"
+  ],
+  "viewports": [
+    {
+      "name": "mobile-320",
+      "width": 320,
+      "height": 720
+    },
+    {
+      "name": "mobile-375",
+      "width": 375,
+      "height": 812
+    },
+    {
+      "name": "mobile-390",
+      "width": 390,
+      "height": 844
+    },
+    {
+      "name": "tablet-768",
+      "width": 768,
+      "height": 1024
+    },
+    {
+      "name": "desktop-1024",
+      "width": 1024,
+      "height": 900
+    },
+    {
+      "name": "desktop-1440",
+      "width": 1440,
+      "height": 1000
+    }
+  ],
+  "findingCount": 0,
+  "findings": []
+}

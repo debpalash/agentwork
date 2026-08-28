@@ -1,5 +1,5 @@
 /**
- * AIWork OpenTelemetry Bootstrap
+ * Collagent OpenTelemetry Bootstrap
  * Import this FIRST before any other module.
  * Sends traces + logs to SigNoz via OTLP (http://aiwork-otel-collector:4318).
  */
@@ -7,7 +7,7 @@ import { NodeSDK } from "@opentelemetry/sdk-node";
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
 import { OTLPLogExporter } from "@opentelemetry/exporter-logs-otlp-http";
 import { OTLPMetricExporter } from "@opentelemetry/exporter-metrics-otlp-http";
-import { Resource } from "@opentelemetry/resources";
+import { resourceFromAttributes } from "@opentelemetry/resources";
 import {
   ATTR_SERVICE_NAME,
   ATTR_SERVICE_VERSION,
@@ -18,15 +18,15 @@ import { PeriodicExportingMetricReader } from "@opentelemetry/sdk-metrics";
 import { getNodeAutoInstrumentations } from "@opentelemetry/auto-instrumentations-node";
 
 const OTEL_ENDPOINT = process.env.OTEL_EXPORTER_OTLP_ENDPOINT || "http://aiwork-otel-collector:4318";
-const SERVICE_NAME = "aiwork-api";
-const SERVICE_VERSION = "2.0.0";
-const ENVIRONMENT = process.env.NODE_ENV || "production";
+const SERVICE_NAME = process.env.OTEL_SERVICE_NAME || "aiwork-api";
+const SERVICE_VERSION = process.env.OTEL_SERVICE_VERSION || "2.0.0";
+const ENVIRONMENT = process.env.NODE_ENV || "development";
 
-const resource = new Resource({
+const resource = resourceFromAttributes({
   [ATTR_SERVICE_NAME]: SERVICE_NAME,
   [ATTR_SERVICE_VERSION]: SERVICE_VERSION,
   "deployment.environment": ENVIRONMENT,
-  "platform": "AIWork",
+  "platform": "Collagent",
   "chain": "Base (EVM)",
 });
 
@@ -47,12 +47,12 @@ const metricExporter = new OTLPMetricExporter({
 
 export const sdk = new NodeSDK({
   resource,
-  spanProcessor: new BatchSpanProcessor(traceExporter),
-  logRecordProcessor: new BatchLogRecordProcessor(logExporter),
-  metricReader: new PeriodicExportingMetricReader({
+  spanProcessors: [new BatchSpanProcessor(traceExporter)],
+  logRecordProcessors: [new BatchLogRecordProcessor({ exporter: logExporter })],
+  metricReaders: [new PeriodicExportingMetricReader({
     exporter: metricExporter,
     exportIntervalMillis: 15_000,
-  }),
+  })],
   instrumentations: [
     getNodeAutoInstrumentations({
       "@opentelemetry/instrumentation-fs": { enabled: false },
@@ -64,6 +64,13 @@ export const sdk = new NodeSDK({
 sdk.start();
 console.log(`[OTel] Tracing → ${OTEL_ENDPOINT} | service=${SERVICE_NAME} env=${ENVIRONMENT}`);
 
-// Graceful shutdown
-process.on("SIGTERM", () => sdk.shutdown().finally(() => process.exit(0)));
-process.on("SIGINT", () => sdk.shutdown().finally(() => process.exit(0)));
+// Flush telemetry without letting an unavailable collector block shutdown.
+let shuttingDown = false;
+function shutdown() {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  const deadline = new Promise<void>((resolve) => setTimeout(resolve, 2_000));
+  void Promise.race([sdk.shutdown(), deadline]).finally(() => process.exit(0));
+}
+process.on("SIGTERM", shutdown);
+process.on("SIGINT", shutdown);

@@ -30,6 +30,7 @@ export interface Task {
   bonusPool?: string;
   deadline?: number;
   totalSteps?: number;
+  totalChunks?: number;
   total_chunks?: number;
   chunks?: string;
   steps?: TaskStep[];
@@ -82,7 +83,6 @@ export interface Bid {
   agentAddress: string;
   amount: string;
   estimatedHours?: number;
-  modelScore?: number;
   agentReputation?: string;
   timestamp?: number;
   onChain?: boolean;
@@ -112,10 +112,9 @@ export interface TaskFilter {
 
 export interface BidSubmission {
   agentAddress: string;
-  agentId?: string;
+  agentId: string;
   amount: number | string;
   estimatedHours?: number;
-  modelScore?: number;
 }
 
 export interface AgentRegistration {
@@ -126,9 +125,9 @@ export interface AgentRegistration {
 }
 
 export interface StepSubmission {
-  agentAddress: string;
-  stepIndex: number;
-  deliverable?: string;
+  chunkIndex: number;
+  agentId: string;
+  commitHash: string;
 }
 
 // ─── Response Types ────────────────────────────────────────────
@@ -162,4 +161,77 @@ export interface MutationResult {
   agentId?: string;
   error?: string;
   message?: string;
+}
+
+// ─── Problem Protocol v1 ──────────────────────────────────────
+export type ProblemDomain = "SOFTWARE" | "MATHEMATICS" | "DATA" | "AI_ML" | "RESEARCH" | "BIOMEDICAL" | "CLIMATE" | "ENGINEERING" | "POLICY" | "OTHER";
+export type ProblemRiskTier = "LOW" | "MODERATE" | "HIGH" | "RESTRICTED";
+export type FundingMechanism = "GRANT" | "MILESTONE" | "PRIZE" | "REPLICATION_BOUNTY" | "RETROACTIVE";
+
+export interface ProblemSpecV1 {
+  version: "1.0";
+  slug?: string;
+  title: string;
+  summary: string;
+  description: string;
+  domain: ProblemDomain;
+  visibility: "PUBLIC" | "UNLISTED" | "PRIVATE";
+  riskTier: ProblemRiskTier;
+  tags?: string[];
+  license: string;
+  funding?: { amount?: string; token?: string; mechanisms?: FundingMechanism[] };
+  verificationPolicy: {
+    mode: "CODE" | "FORMAL_PROOF" | "REPRODUCIBLE_RESEARCH" | "EXPERT_PANEL" | "HYBRID";
+    minimumIndependentReviews: number;
+    replicationRequired: boolean;
+    minimumReplications?: number;
+    artifactRequirements?: string[];
+    acceptanceCriteria: string[];
+  };
+  governance?: Record<string, unknown>;
+  ethics?: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
+}
+
+export interface Problem extends ProblemSpecV1 {
+  id: string;
+  status: "DRAFT" | "OPEN" | "ACTIVE" | "REVIEW" | "COMPLETED" | "CANCELLED" | "QUARANTINED";
+  funderId: string;
+  funderType: string;
+  contentDigest: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ProblemGraph {
+  problem: Problem;
+  graph: {
+    workstreams: unknown[];
+    dependencies: unknown[];
+    contributions: unknown[];
+    evidence: unknown[];
+    reviews: unknown[];
+    credits: unknown[];
+    fundingPools: unknown[];
+  };
+  counts: { workstreams: number; contributions: number; evidence: number; reviews: number; credits: number };
+}
+
+export interface FundingPledge {
+  mechanism: FundingMechanism;
+  token: string;
+  committedAmount: string;
+  escrowReference?: string;
+}
+
+export interface ContributionSubmission {
+  workstreamId?: string;
+  title: string;
+  summary: string;
+  artifactUri: string;
+  artifactDigest: string;
+  artifactType: "CODE" | "PROOF" | "DATASET" | "MODEL" | "PAPER" | "PROTOCOL" | "EXPERIMENT" | "ANALYSIS" | "REVIEW" | "NEGATIVE_RESULT" | "OTHER";
+  license: string;
+  provenance: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
 }

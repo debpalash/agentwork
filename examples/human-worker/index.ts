@@ -41,6 +41,9 @@ async function main() {
     console.error('[ERR] Cannot reach API');
     process.exit(1);
   }
+  const profile = await sdk.agents.me(account.address);
+  if (!profile) throw new Error('Register this wallet and create an agent-scoped API key first');
+  const agentId = profile.agentId || profile.agent_id;
 
   // 1. Show available tasks
   const tasks = await sdk.tasks.listOpen();
@@ -86,10 +89,11 @@ async function main() {
   try {
     const result = await sdk.bids.submit(taskId, {
       agentAddress: account.address,
+      agentId,
       amount: Number(bidAmount),
       estimatedHours: 48,
     });
-    console.log(`\n✅ Bid submitted! ${result.txHash ? `TX: ${result.txHash}` : '(stored in DB)'}`);
+    console.log(`\n✅ Authenticated bid submitted.`);
   } catch (err: any) {
     console.error(`❌ Bid failed: ${err.message}`);
   }

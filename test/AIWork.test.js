@@ -8,6 +8,7 @@ describe("AIWork Platform", function () {
 
   const PLATFORM_ROLE = ethers.keccak256(ethers.toUtf8Bytes("PLATFORM_ROLE"));
   const VALIDATOR_ROLE = ethers.keccak256(ethers.toUtf8Bytes("VALIDATOR_ROLE"));
+  const VERIFIER_ROLE = ethers.keccak256(ethers.toUtf8Bytes("VERIFIER_ROLE"));
 
   beforeEach(async function () {
     [deployer, treasury, validatorPool, poster, agentWallet, agentWallet2] =
@@ -35,6 +36,7 @@ describe("AIWork Platform", function () {
       validatorPool.address
     );
     await escrowVault.waitForDeployment();
+    await escrowVault.setPaymentToken(await mockUSDC.getAddress(), true);
 
     // Deploy Complexity Oracle
     const ComplexityOracle =
@@ -231,6 +233,9 @@ describe("AIWork Platform", function () {
 
       const agent = await agentRegistry.getAgent(agentId);
       expect(agent.stakedAmount).to.equal(stakeAmount);
+      await expect(
+        agentRegistry.connect(agentWallet).unstake(agentId, stakeAmount)
+      ).to.be.revertedWithCustomError(agentRegistry, "UnstakeCooldownActive");
     });
 
     it("should check reputation meets complexity requirement", async function () {
@@ -380,6 +385,45 @@ describe("AIWork Platform", function () {
       const expectedRefund = amount - (amount * 100n) / 10000n;
       expect(posterAfter - posterBefore).to.equal(expectedRefund);
     });
+
+    it("should refund quality-adjustment remainder and close full-payment escrow", async function () {
+      const taskId = ethers.keccak256(ethers.toUtf8Bytes("escrow-quality-refund"));
+      const amount = ethers.parseEther("1000");
+      await mockUSDC.connect(poster).approve(await escrowVault.getAddress(), amount);
+      await escrowVault.lockFunds(taskId, poster.address, await mockUSDC.getAddress(), amount);
+
+      const posterBefore = await mockUSDC.balanceOf(poster.address);
+      await escrowVault.releaseFullPayment(taskId, "agent-test", agentWallet.address, 0);
+      const posterAfter = await mockUSDC.balanceOf(poster.address);
+      const escrow = await escrowVault.getEscrow(taskId);
+
+      expect(posterAfter - posterBefore).to.equal((amount * 2000n) / 10000n);
+      expect(escrow.remaining).to.equal(0n);
+      expect(escrow.isActive).to.be.false;
+      expect(await escrowVault.totalLockedByPoster(poster.address)).to.equal(0n);
+    });
+
+    it("should return unused platform bonus to treasury on cancellation", async function () {
+      const taskId = ethers.keccak256(ethers.toUtf8Bytes("escrow-platform-bonus"));
+      const amount = ethers.parseEther("1000");
+      const bonus = ethers.parseEther("100");
+      await mockUSDC.connect(poster).approve(await escrowVault.getAddress(), amount);
+      await escrowVault.lockFunds(taskId, poster.address, await mockUSDC.getAddress(), amount);
+      await mockUSDC.connect(treasury).approve(await escrowVault.getAddress(), bonus);
+      await escrowVault.addPlatformBonus(taskId, bonus, "test bonus");
+
+      const posterBefore = await mockUSDC.balanceOf(poster.address);
+      const treasuryBefore = await mockUSDC.balanceOf(treasury.address);
+      await escrowVault.refundPoster(taskId);
+
+      expect((await mockUSDC.balanceOf(poster.address)) - posterBefore).to.equal(
+        amount - (amount * 100n) / 10000n
+      );
+      expect((await mockUSDC.balanceOf(treasury.address)) - treasuryBefore).to.equal(
+        bonus + (amount * 100n) / 10000n
+      );
+      expect(await escrowVault.totalLockedByPoster(poster.address)).to.equal(0n);
+    });
   });
 
   // ═══════════════════════════════════════════════════════════════
@@ -459,7 +503,12 @@ describe("AIWork Platform", function () {
       await complexityOracle.createAssessment(taskId, 5, factors);
       await complexityOracle.quickFinalize(taskId);
 
-      // Poster verifies with quality score 85
+      await expect(
+        taskManager.connect(poster).verifyCompletion(taskId, true, 85)
+      ).to.be.revertedWithCustomError(taskManager, "VerificationRequired");
+      await taskManager.attestVerification(taskId, 0, ethers.id("full-verification-evidence"), true, 85);
+
+      // Poster can release only at the attested quality score.
       await taskManager.connect(poster).verifyCompletion(taskId, true, 85);
 
       // Check agent got paid
@@ -469,7 +518,77 @@ describe("AIWork Platform", function () {
       // Check task is completed
       const task = await taskManager.getTask(taskId);
       expect(task.status).to.equal(4n); // COMPLETED
+      const escrow = await escrowVault.getEscrow(taskId);
+      expect(escrow.remaining).to.equal(0n);
+      expect(escrow.isActive).to.be.false;
       expect(task.posterVerified).to.be.true;
+    });
+
+    it("should require an independent verifier quorum before settlement", async function () {
+      const reward = ethers.parseEther("250");
+      await taskManager.setVerificationQuorum(3);
+      await taskManager.grantRole(VERIFIER_ROLE, treasury.address);
+      await taskManager.grantRole(VERIFIER_ROLE, validatorPool.address);
+      await mockUSDC.connect(poster).approve(await escrowVault.getAddress(), reward);
+
+      const tx = await taskManager.connect(poster).postTask(
+        "Quorum verified result",
+        "CODE",
+        0,
+        await mockUSDC.getAddress(),
+        reward,
+        0,
+        5,
+        Math.floor(Date.now() / 1000) + 86400,
+        ethers.id("quorum-requirements"),
+        [],
+        []
+      );
+      const receipt = await tx.wait();
+      const event = receipt.logs.find((log) => {
+        try { return taskManager.interface.parseLog(log)?.name === "TaskPosted"; }
+        catch { return false; }
+      });
+      const taskId = taskManager.interface.parseLog(event).args.taskId;
+      const factors = {
+        technicalDepth: 5, domainSpecificity: 5, outputVolume: 5,
+        multiStepReasoning: 5, creativityRequired: 5, verifiability: 5,
+        timeConstraint: 5,
+      };
+      await complexityOracle.createAssessment(taskId, 5, factors);
+      await complexityOracle.quickFinalize(taskId);
+      await taskManager.assignTask(taskId, agentId);
+      await taskManager.connect(agentWallet).submitCompletion(taskId, ethers.id("quorum-output"));
+
+      const evidence = ethers.id("shared-verification-evidence");
+      await taskManager.attestVerification(taskId, 0, evidence, true, 90);
+      await expect(
+        taskManager.connect(poster).verifyCompletion(taskId, false, 0)
+      ).to.be.revertedWithCustomError(taskManager, "VerificationRequired");
+      await expect(
+        taskManager.connect(poster).verifyCompletion(taskId, true, 90)
+      ).to.be.revertedWithCustomError(taskManager, "VerificationRequired");
+      await expect(
+        taskManager.attestVerification(taskId, 0, evidence, true, 90)
+      ).to.be.revertedWithCustomError(taskManager, "VerifierAlreadyVoted");
+      await expect(
+        taskManager.connect(treasury).attestVerification(taskId, 0, ethers.id("different-evidence"), true, 80)
+      ).to.be.revertedWithCustomError(taskManager, "EvidenceHashMismatch");
+
+      await taskManager.connect(treasury).attestVerification(taskId, 0, evidence, true, 80);
+      await expect(
+        taskManager.connect(poster).verifyCompletion(taskId, true, 85)
+      ).to.be.revertedWithCustomError(taskManager, "VerificationRequired");
+      await taskManager.connect(validatorPool).attestVerification(taskId, 0, evidence, false, 0);
+
+      const consensus = await taskManager.verificationAttestations(taskId, 0);
+      expect(consensus.passed).to.be.true;
+      expect(consensus.qualityScore).to.equal(85n);
+      await expect(
+        taskManager.connect(poster).verifyCompletion(taskId, false, 0)
+      ).to.be.revertedWithCustomError(taskManager, "VerificationRequired");
+      await taskManager.connect(poster).verifyCompletion(taskId, true, 85);
+      expect((await taskManager.getTask(taskId)).status).to.equal(4n);
     });
 
     it("should handle step-based task with milestone payments", async function () {
@@ -524,6 +643,17 @@ describe("AIWork Platform", function () {
         .connect(agentWallet)
         .submitStep(taskId, 0, ethers.keccak256(ethers.toUtf8Bytes("step1")));
 
+      await expect(
+        taskManager.connect(poster).verifyStep(taskId, 1, true, 75)
+      ).to.be.revertedWithCustomError(taskManager, "WrongStep");
+      await expect(
+        taskManager.connect(poster).verifyStep(taskId, 0, true, 101)
+      ).to.be.revertedWith("Invalid quality score");
+      await expect(
+        taskManager.connect(poster).verifyStep(taskId, 0, true, 75)
+      ).to.be.revertedWithCustomError(taskManager, "VerificationRequired");
+      await taskManager.attestVerification(taskId, 0, ethers.id("step-0-evidence"), true, 75);
+
       const balanceAfterStep0Before = await mockUSDC.balanceOf(
         agentWallet.address
       );
@@ -535,12 +665,14 @@ describe("AIWork Platform", function () {
       await taskManager
         .connect(agentWallet)
         .submitStep(taskId, 1, ethers.keccak256(ethers.toUtf8Bytes("step2")));
+      await taskManager.attestVerification(taskId, 1, ethers.id("step-1-evidence"), true, 80);
       await taskManager.connect(poster).verifyStep(taskId, 1, true, 80);
 
       // Complete step 3
       await taskManager
         .connect(agentWallet)
         .submitStep(taskId, 2, ethers.keccak256(ethers.toUtf8Bytes("step3")));
+      await taskManager.attestVerification(taskId, 2, ethers.id("step-2-evidence"), true, 90);
       await taskManager.connect(poster).verifyStep(taskId, 2, true, 90);
 
       // Task should be completed
@@ -551,6 +683,65 @@ describe("AIWork Platform", function () {
       const agent = await agentRegistry.getAgent(agentId);
       expect(agent.tasksCompleted).to.equal(3n);
       expect(agent.currentStreak).to.equal(3n);
+    });
+
+    it("should close escrow when the final step is approved by timeout", async function () {
+      const reward = ethers.parseEther("100");
+      await mockUSDC.connect(poster).approve(await escrowVault.getAddress(), reward);
+
+      const tx = await taskManager.connect(poster).postTask(
+        "Timeout-reviewed milestone",
+        "CODE",
+        1,
+        await mockUSDC.getAddress(),
+        reward,
+        0,
+        3,
+        Math.floor(Date.now() / 1000) + 604800,
+        ethers.keccak256(ethers.toUtf8Bytes("timeout-reqs")),
+        ["Only milestone"],
+        [10000]
+      );
+      const receipt = await tx.wait();
+      const event = receipt.logs.find((log) => {
+        try { return taskManager.interface.parseLog(log)?.name === "TaskPosted"; }
+        catch { return false; }
+      });
+      const taskId = taskManager.interface.parseLog(event).args.taskId;
+
+      const factors = {
+        technicalDepth: 3,
+        domainSpecificity: 3,
+        outputVolume: 3,
+        multiStepReasoning: 3,
+        creativityRequired: 3,
+        verifiability: 7,
+        timeConstraint: 3,
+      };
+      await complexityOracle.createAssessment(taskId, 3, factors);
+      await complexityOracle.quickFinalize(taskId);
+      await taskManager.assignTask(taskId, agentId);
+      await taskManager.connect(agentWallet).submitStep(
+        taskId,
+        0,
+        ethers.keccak256(ethers.toUtf8Bytes("timeout-deliverable"))
+      );
+      await taskManager.attestVerification(taskId, 0, ethers.id("timeout-evidence"), true, 88);
+
+      await ethers.provider.send("evm_increaseTime", [48 * 60 * 60 + 1]);
+      await ethers.provider.send("evm_mine");
+      await expect(
+        taskManager.connect(agentWallet).triggerAutoApproval(taskId)
+      ).to.be.revertedWithCustomError(taskManager, "AccessControlUnauthorizedAccount");
+      await taskManager.triggerAutoApproval(taskId);
+
+      const task = await taskManager.getTask(taskId);
+      const escrow = await escrowVault.getEscrow(taskId);
+      expect(task.status).to.equal(4n);
+      expect(task.paidOut).to.be.gt(0n);
+      expect(escrow.remaining).to.equal(0n);
+      expect(escrow.isActive).to.be.false;
+      expect(await escrowVault.totalLockedByPoster(poster.address)).to.equal(0n);
     });
   });
 });

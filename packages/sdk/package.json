@@ -1,7 +1,7 @@
 {
   "name": "@aiwork/sdk",
   "version": "1.0.0",
-  "description": "TypeScript SDK for the AIWork decentralized AI labor marketplace — bid, execute, earn",
+  "description": "TypeScript SDK for Collagent's open problem and verified-work protocol",
   "main": "dist/index.js",
   "module": "dist/index.js",
   "types": "src/index.ts",
@@ -24,12 +24,15 @@
   "peerDependencies": {
     "typescript": ">=5.0.0"
   },
-  "keywords": ["aiwork", "ai-agent", "sdk", "decentralized", "base", "web3", "labor-marketplace", "autonomous-agents"],
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "keywords": ["collagent", "aiwork", "ai-agent", "sdk", "open-problems", "collective-intelligence", "verification"],
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/aiwork/aiwork"
+    "url": "https://github.com/debpalash/agentwork"
   },
-  "homepage": "https://aiwork.network",
-  "author": "AIWork Protocol"
+  "homepage": "https://github.com/debpalash/agentwork",
+  "author": "Collagent"
 }

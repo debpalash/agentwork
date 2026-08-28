@@ -1,0 +1,211 @@
+# Production hardening overlay.
+#
+# Every externally sourced image is supplied as an immutable digest reference,
+# for example `postgres:18-alpine@sha256:...`. Compose fails before deployment
+# when a required secret, signer, verifier target, or image lock is absent.
+
+x-worker-build: &worker-build
+  build:
+    context: .
+    dockerfile: docker/Dockerfile.api
+  restart: unless-stopped
+  depends_on:
+    postgres:
+      condition: service_healthy
+
+x-worker-environment: &worker-environment
+  NODE_ENV: production
+  DATABASE_URL: postgres://aiwork:${POSTGRES_PASSWORD:?required}@postgres:5432/aiwork
+  RPC_URL: ${RPC_URL:?required}
+  CHAIN_ID: ${CHAIN_ID:?required}
+  TOKEN_ADDRESS: ${TOKEN_ADDRESS:?required}
+  AGENT_REGISTRY_ADDRESS: ${AGENT_REGISTRY_ADDRESS:?required}
+  ESCROW_VAULT_ADDRESS: ${ESCROW_VAULT_ADDRESS:?required}
+  COMPLEXITY_ORACLE_ADDRESS: ${COMPLEXITY_ORACLE_ADDRESS:?required}
+  TASK_MANAGER_ADDRESS: ${TASK_MANAGER_ADDRESS:?required}
+  BIDDING_ENGINE_ADDRESS: ${BIDDING_ENGINE_ADDRESS:?required}
+  DISPUTE_RESOLUTION_ADDRESS: ${DISPUTE_RESOLUTION_ADDRESS:?required}
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://signoz-otel-collector:4318
+  OTEL_SERVICE_VERSION: ${RELEASE_VERSION:?required}
+
+services:
+  postgres:
+    image: ${POSTGRES_IMAGE:?set an immutable digest-pinned PostgreSQL image}
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}
+
+  forgejo:
+    image: ${FORGEJO_IMAGE:?set an immutable digest-pinned Forgejo image}
+    environment:
+      FORGEJO__database__PASSWD: ${POSTGRES_PASSWORD:?required}
+
+  daytona-api:
+    image: ${DAYTONA_API_IMAGE:?set an immutable digest-pinned Daytona API image}
+    environment:
+      ENCRYPTION_KEY: ${DAYTONA_ENCRYPTION_KEY:?required}
+      ENCRYPTION_SALT: ${DAYTONA_ENCRYPTION_SALT:?required}
+      DB_PASSWORD: ${DAYTONA_DB_PASSWORD:?required}
+      TRANSIENT_REGISTRY_PASSWORD: ${DAYTONA_REGISTRY_PASSWORD:?required}
+      INTERNAL_REGISTRY_PASSWORD: ${DAYTONA_REGISTRY_PASSWORD:?required}
+      S3_ACCESS_KEY: ${DAYTONA_S3_ACCESS_KEY:?required}
+      S3_SECRET_KEY: ${DAYTONA_S3_SECRET_KEY:?required}
+      PROXY_API_KEY: ${DAYTONA_PROXY_API_KEY:?required}
+      DEFAULT_RUNNER_API_KEY: ${DAYTONA_RUNNER_API_KEY:?required}
+      OIDC_ISSUER_BASE_URL: ${DAYTONA_OIDC_ISSUER:?required}
+      PUBLIC_OIDC_DOMAIN: ${DAYTONA_PUBLIC_OIDC_DOMAIN:?required}
+      DASHBOARD_URL: ${DAYTONA_DASHBOARD_URL:?required}
+      DASHBOARD_BASE_API_URL: ${DAYTONA_DASHBOARD_URL:?required}
+      SKIP_USER_EMAIL_VERIFICATION: "false"
+    privileged: false
+
+  daytona-runner:
+    image: ${DAYTONA_RUNNER_IMAGE:?set an immutable digest-pinned Daytona runner image}
+    environment:
+      DAYTONA_RUNNER_TOKEN: ${DAYTONA_RUNNER_API_KEY:?required}
+      AWS_ACCESS_KEY_ID: ${DAYTONA_S3_ACCESS_KEY:?required}
+      AWS_SECRET_ACCESS_KEY: ${DAYTONA_S3_SECRET_KEY:?required}
+      ENVIRONMENT: production
+      INTER_SANDBOX_NETWORK_ENABLED: "false"
+      SSH_GATEWAY_ENABLE: "false"
+
+  daytona-db:
+    image: ${POSTGRES_IMAGE:?set an immutable digest-pinned PostgreSQL image}
+    environment:
+      POSTGRES_PASSWORD: ${DAYTONA_DB_PASSWORD:?required}
+
+  daytona-redis:
+    image: ${REDIS_IMAGE:?set an immutable digest-pinned Redis image}
+
+  daytona-dex:
+    image: ${DEX_IMAGE:?set an immutable digest-pinned Dex image}
+    volumes:
+      - type: bind
+        source: ${DAYTONA_DEX_CONFIG_PATH:?provide a production Dex config without local credentials}
+        target: /etc/dex/config.yaml
+        read_only: true
+
+  daytona-minio:
+    image: ${MINIO_IMAGE:?set an immutable digest-pinned MinIO image}
+    environment:
+      MINIO_ROOT_USER: ${DAYTONA_S3_ACCESS_KEY:?required}
+      MINIO_ROOT_PASSWORD: ${DAYTONA_S3_SECRET_KEY:?required}
+
+  daytona-registry:
+    image: ${REGISTRY_IMAGE:?set an immutable digest-pinned OCI registry image}
+
+  api:
+    image: ${AIWORK_API_IMAGE:?set the immutable digest-pinned API image}
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgres://aiwork:${POSTGRES_PASSWORD:?required}@postgres:5432/aiwork
+      PLATFORM_PRIVATE_KEY: ${PLATFORM_PRIVATE_KEY:?required}
+      DAYTONA_API_KEY: ${DAYTONA_API_KEY:?required}
+      FORGEJO_ADMIN_TOKEN: ${FORGEJO_ADMIN_TOKEN:?required}
+      FORGEJO_READ_TOKEN: ${FORGEJO_READ_TOKEN:?required}
+      FORGEJO_WEBHOOK_SECRET: ${WEBHOOK_SECRET:?required}
+      API_KEYS: ${API_KEYS:?required}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:?required}
+      AUTH_ALLOWED_ORIGINS: ${AUTH_ALLOWED_ORIGINS:?required}
+      RPC_URL: ${RPC_URL:?required}
+      CHAIN_ID: ${CHAIN_ID:?required}
+      TOKEN_ADDRESS: ${TOKEN_ADDRESS:?required}
+      AGENT_REGISTRY_ADDRESS: ${AGENT_REGISTRY_ADDRESS:?required}
+      ESCROW_VAULT_ADDRESS: ${ESCROW_VAULT_ADDRESS:?required}
+      COMPLEXITY_ORACLE_ADDRESS: ${COMPLEXITY_ORACLE_ADDRESS:?required}
+      TASK_MANAGER_ADDRESS: ${TASK_MANAGER_ADDRESS:?required}
+      BIDDING_ENGINE_ADDRESS: ${BIDDING_ENGINE_ADDRESS:?required}
+      DISPUTE_RESOLUTION_ADDRESS: ${DISPUTE_RESOLUTION_ADDRESS:?required}
+      VERIFIER_QUORUM: ${VERIFIER_QUORUM:?required}
+      VERIFIER_INSTANCE_IDS: verifier-1,verifier-2,verifier-3
+      ARBITER_ADDRESSES: ${ARBITER_ADDRESSES:?required}
+      WORKER_QUEUES: ""
+      OTEL_SERVICE_VERSION: ${RELEASE_VERSION:?required}
+    deploy:
+      replicas: 2
+      update_config:
+        order: start-first
+        failure_action: rollback
+      rollback_config:
+        order: stop-first
+
+  scheduler:
+    <<: *worker-build
+    image: ${AIWORK_API_IMAGE:?set the immutable digest-pinned API image}
+    command: ["bun", "run", "src/worker.ts"]
+    environment:
+      <<: *worker-environment
+      PLATFORM_PRIVATE_KEY: ${PLATFORM_PRIVATE_KEY:?required}
+      WORKER_QUEUES: bidding-deadline,notifications
+      OTEL_SERVICE_NAME: aiwork-scheduler
+
+  verifier-1:
+    <<: *worker-build
+    image: ${AIWORK_API_IMAGE:?set the immutable digest-pinned API image}
+    command: ["bun", "run", "src/worker.ts"]
+    environment:
+      <<: *worker-environment
+      PLATFORM_PRIVATE_KEY: ${VERIFIER_1_PRIVATE_KEY:?required}
+      VERIFIER_INSTANCE_ID: verifier-1
+      WORKER_QUEUES: verification
+      DAYTONA_API_URL: ${VERIFIER_1_DAYTONA_API_URL:?required}
+      DAYTONA_API_KEY: ${VERIFIER_1_DAYTONA_API_KEY:?required}
+      FORGEJO_READ_TOKEN: ${VERIFIER_1_FORGEJO_READ_TOKEN:?required}
+      OTEL_SERVICE_NAME: aiwork-verifier-1
+
+  verifier-2:
+    <<: *worker-build
+    image: ${AIWORK_API_IMAGE:?set the immutable digest-pinned API image}
+    command: ["bun", "run", "src/worker.ts"]
+    environment:
+      <<: *worker-environment
+      PLATFORM_PRIVATE_KEY: ${VERIFIER_2_PRIVATE_KEY:?required}
+      VERIFIER_INSTANCE_ID: verifier-2
+      WORKER_QUEUES: verification
+      DAYTONA_API_URL: ${VERIFIER_2_DAYTONA_API_URL:?required}
+      DAYTONA_API_KEY: ${VERIFIER_2_DAYTONA_API_KEY:?required}
+      FORGEJO_READ_TOKEN: ${VERIFIER_2_FORGEJO_READ_TOKEN:?required}
+      OTEL_SERVICE_NAME: aiwork-verifier-2
+
+  verifier-3:
+    <<: *worker-build
+    image: ${AIWORK_API_IMAGE:?set the immutable digest-pinned API image}
+    command: ["bun", "run", "src/worker.ts"]
+    environment:
+      <<: *worker-environment
+      PLATFORM_PRIVATE_KEY: ${VERIFIER_3_PRIVATE_KEY:?required}
+      VERIFIER_INSTANCE_ID: verifier-3
+      WORKER_QUEUES: verification
+      DAYTONA_API_URL: ${VERIFIER_3_DAYTONA_API_URL:?required}
+      DAYTONA_API_KEY: ${VERIFIER_3_DAYTONA_API_KEY:?required}
+      FORGEJO_READ_TOKEN: ${VERIFIER_3_FORGEJO_READ_TOKEN:?required}
+      OTEL_SERVICE_NAME: aiwork-verifier-3
+
+  frontend:
+    image: ${AIWORK_FRONTEND_IMAGE:?set the immutable digest-pinned frontend image}
+
+  caddy:
+    image: ${CADDY_IMAGE:?set an immutable digest-pinned Caddy image}
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:?required}
+      API_ADDRESS: ${API_ADDRESS:?required}
+      GIT_ADDRESS: ${GIT_ADDRESS:?required}
+
+  signoz-zookeeper:
+    image: ${ZOOKEEPER_IMAGE:?set an immutable digest-pinned Zookeeper image}
+
+  signoz-init-clickhouse:
+    image: ${CLICKHOUSE_IMAGE:?set an immutable digest-pinned ClickHouse image}
+
+  signoz-clickhouse:
+    image: ${CLICKHOUSE_IMAGE:?set an immutable digest-pinned ClickHouse image}
+
+  signoz-telemetry-migrator:
+    image: ${SIGNOZ_OTEL_IMAGE:?set an immutable digest-pinned SigNoz collector image}
+
+  signoz:
+    image: ${SIGNOZ_IMAGE:?set an immutable digest-pinned SigNoz image}
+    environment:
+      SIGNOZ_TOKENIZER_JWT_SECRET: ${SIGNOZ_JWT_SECRET:?required}
+
+  signoz-otel-collector:
+    image: ${SIGNOZ_OTEL_IMAGE:?set an immutable digest-pinned SigNoz collector image}

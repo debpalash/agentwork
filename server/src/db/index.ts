@@ -1,4 +1,5 @@
 import { Pool } from "pg";
+import { runMigrations } from "./migrations";
 
 // ─── PostgreSQL Connection ─────────────────────────────────────
 const DATABASE_URL =
@@ -18,16 +19,36 @@ pool.on("error", (err) => {
 // ─── Schema check (tables are created by docker/init.sql) ──────
 export async function initDB() {
   try {
+    await runMigrations(pool);
     const client = await pool.connect();
+    const requiredTables = [
+      "agents", "tasks", "chunks", "bids", "activity_log",
+      "task_specs", "verification_jobs", "api_keys", "audit_log", "disputes",
+      "problems", "workstreams", "workstream_dependencies", "contributions",
+      "evidence", "contribution_reviews", "auth_replay_protection",
+      "chain_operations", "actor_trust_profiles", "institutional_approvals",
+      "problem_access_grants", "verifier_receipts", "governance_audit_log", "durable_jobs",
+    ];
     // Quick connectivity + schema check
-    const { rows } = await client.query(
-      `SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_name IN ('agents', 'tasks', 'bids', 'activity_log')`
-    );
-    client.release();
+    let rows: any[];
+    try {
+      ({ rows } = await client.query(
+        `SELECT table_name FROM information_schema.tables
+         WHERE table_schema = 'public' AND table_name = ANY($1::text[])`,
+        [requiredTables]
+      ));
+    } finally {
+      client.release();
+    }
     const tables = rows.map((r: any) => r.table_name);
+    const missing = requiredTables.filter((table) => !tables.includes(table));
+    if (process.env.NODE_ENV === "production" && missing.length > 0) {
+      throw new Error(`Missing required database tables: ${missing.join(", ")}`);
+    }
     console.log(`[DB] Connected. Tables found: ${tables.join(", ") || "none (run docker compose up to init)"}`);
   } catch (err: any) {
-    console.warn(`[DB] Connection failed: ${err.message}. API will fall back to chain-only reads.`);
+    if (process.env.NODE_ENV === "production") throw err;
+    console.warn(`[DB] Connection failed: ${err.message}. Development reads may fall back to chain state.`);
   }
 }
 
@@ -103,21 +124,24 @@ export async function upsertTask(task: {
   maxBudget: string;
   bonusPool?: string;
   deadline?: number;
+  biddingEnds?: number;
   totalChunks?: number;
   description?: string;
   txHash?: string;
 }) {
   await pool.query(
-    `INSERT INTO tasks (task_id, employer, title, category, phase, max_budget, bonus_pool, deadline, total_chunks, description, tx_hash)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+    `INSERT INTO tasks (task_id, employer, title, category, phase, max_budget, bonus_pool, deadline, bidding_ends, total_chunks, description, tx_hash)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
      ON CONFLICT (task_id) DO UPDATE SET
        phase = EXCLUDED.phase,
        max_budget = EXCLUDED.max_budget,
+       bidding_ends = COALESCE(tasks.bidding_ends, EXCLUDED.bidding_ends),
        updated_at = NOW()`,
     [
       task.taskId, task.employer, task.title, task.category,
       task.phase || "POSTED", task.maxBudget, task.bonusPool || "0",
       task.deadline ? new Date(task.deadline * 1000).toISOString() : null,
+      task.biddingEnds ? new Date(task.biddingEnds * 1000).toISOString() : null,
       task.totalChunks || 0, task.description || "", task.txHash || "",
     ]
   );
@@ -142,7 +166,6 @@ export async function insertBid(bid: {
   agentAddress: string;
   amount: string;
   estimatedHours?: number;
-  modelScore?: number;
   reputation?: string;
   txHash?: string;
 }) {
@@ -152,7 +175,7 @@ export async function insertBid(bid: {
     [
       bid.taskId, bid.agentId || "unknown",
       bid.agentAddress, bid.amount,
-      bid.estimatedHours || 24, bid.modelScore || 50,
+      bid.estimatedHours || 24, 0,
       bid.txHash || null,
     ]
   );
@@ -161,7 +184,9 @@ export async function insertBid(bid: {
 
 export async function getBidsByTask(taskId: string) {
   const { rows } = await pool.query(
-    "SELECT * FROM bids WHERE task_id = $1 ORDER BY bid_price ASC",
+    `SELECT b.*, a.reputation AS agent_reputation
+     FROM bids b LEFT JOIN agents a ON a.agent_id = b.agent_id
+     WHERE b.task_id = $1 ORDER BY b.bid_price ASC`,
     [taskId]
   );
   return rows;

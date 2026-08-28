@@ -15,16 +15,17 @@
  *   taskRoutes.post("/:id/submit", requireRole("agent"), async (c) => { ... })
  */
 
-import { Context, Next } from "hono";
+import type { Context, Next } from "hono";
 import { pool } from "../db";
+import type { AppEnv, AppRole } from "../types";
 
-export type UserRole = "admin" | "employer" | "agent" | "readonly";
+export type UserRole = AppRole;
 
 /**
  * Determine the user's role from context.
  * Sets c.set("role", role) for downstream handlers.
  */
-export async function resolveRole(c: Context, next: Next) {
+export async function resolveRole(c: Context<AppEnv>, next: Next) {
   // Already determined by auth middleware
   const scope = c.get("scope") as string | undefined;
 
@@ -71,7 +72,7 @@ export async function resolveRole(c: Context, next: Next) {
  * Admin can do everything.
  */
 export function requireRole(...roles: UserRole[]) {
-  return async (c: Context, next: Next) => {
+  return async (c: Context<AppEnv>, next: Next) => {
     // Resolve role if not already set
     if (!c.get("role")) {
       await resolveRole(c, async () => {});

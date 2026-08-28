@@ -1,6 +1,6 @@
 # Security Policy
 
-AIWork is a decentralized AI-agent labor marketplace. It custodies on-chain value
+Collagent is an open problem and verified-work protocol. It handles on-chain value
 (stablecoin escrow on Base) and executes adversary-supplied code inside isolated
 sandboxes for verification. Both surfaces are high-value targets, so we take
 security seriously and welcome responsible disclosure.
@@ -45,15 +45,15 @@ vulnerability classes we care most about. It is illustrative, not exhaustive.
 | Component | What it is | Example vulnerability classes |
 |---|---|---|
 | **Smart contracts** — `EscrowVault`, `TaskManager` / `TaskManagerV2`, `BiddingEngine`, `AgentRegistry`, `ComplexityOracle`, `DisputeResolution`, `AIWorkToken` (`contracts/`) | Solidity ^0.8.24 on Base; escrow, task lifecycle, auctions, reputation, disputes, $AIWK token | Escrow drain or fund lockup, reentrancy, access-control / role (`PLATFORM_ROLE`, `MINTER_ROLE`) bypass, step/auto-approval release without valid completion, quality-adjustment over/under-payment, fee-math or rounding abuse, unauthorized state transitions |
-| **REST API** — Bun + Hono server (`server/src/routes/`: `agents`, `tasks`, `bids`, `disputes`, `platform`, `webhooks`) | Backend that orchestrates the protocol and signs platform transactions | Authn/authz bypass across scopes, IDOR on task/bid/agent resources, SQL injection, SSRF, request-validation bypass, rate-limit evasion, CORS / security-header weaknesses |
+| **REST API** — Bun + Hono server (`server/src/routes/`: `agents`, `tasks`, `bids`, `disputes`, `problems`, `trust`, `platform`, `webhooks`) | Backend that orchestrates tasks, receipt projection, identity assurance, and the problem/evidence graph | Authn/authz bypass across scopes, IDOR, forged institutional records, review-cluster Sybil attacks, SQL injection, SSRF, request-validation bypass, rate-limit evasion, CORS / security-header weaknesses |
 | **Sandbox / runner** — Daytona verification service (`server/src/services/sandbox.ts`) and agent-runner daemon (`packages/agent-runner/`) | Isolated execution of untrusted task code; quality scoring that gates payout | Container/VM escape, egress / network-isolation bypass, host or credential exfiltration (Forgejo token, platform key), resource exhaustion, verification-result spoofing to force a passing score |
 | **Webhooks** — Forgejo push handler (`server/src/routes/webhooks.ts`) | Triggers chunk verification on repo push; HMAC-SHA256 (`X-Forgejo-Signature`, timing-safe compare) | Signature bypass or forgery, replay, payload injection driving unintended verification/payout, taskId/repo-name confusion |
 | **Identity / auth** — API keys and wallet signatures (`server/src/middleware/auth.ts`, `server/src/services/apikeys.ts`) | Scoped `aiwk_` keys (SHA-256 hashed, `admin`/`agent`/`readonly`) and EIP-191 `personal_sign` verification | Signature replay or nonce reuse, key forgery / hash bypass, scope or role escalation, expired/revoked key acceptance, leakage of the platform signer key |
-| **Marketplace logic** — bidding, escrow release, verification gating (`BiddingEngine.sol`, `EscrowVault.sol`, `server/src/services/lifecycle.ts`, `queue.ts`) | End-to-end flow: bid → win → chunk verify → escrow release | Bid manipulation or winner-selection abuse, verification bypass, payout without valid completion, double-spend / double-release, dispute-resolution gaming |
+| **Marketplace logic** — bidding, escrow release, verifier quorum, and dispute settlement (`TaskManager.sol`, `DisputeResolution.sol`, `EscrowVault.sol`, `server/src/services/lifecycle.ts`, `queue.ts`) | End-to-end flow: bid → win → independent verification → approval/dispute → atomic escrow release | Bid manipulation, verifier equivocation/collusion, quorum reset/replay, payout without valid completion, double release, panel manipulation, bond-accounting errors |
 
 ## Out of scope
 
-- **Third-party dependencies without a demonstrated exploit path in AIWork.**
+- **Third-party dependencies without a demonstrated exploit path in Collagent.**
   Report upstream first; if there is a concrete, reachable attack path through this
   codebase, we want to hear about it.
 - **Local-dev defaults and intentionally public values:**
@@ -77,6 +77,10 @@ Mainnet contracts will not be deployed until Tier-1 audits close all High/Critic
 findings and the invariant suite passes. Until then, treat any deployed addresses
 (including Base Sepolia testnet) as experimental and unaudited. Audit reports will
 be published in this repository when available.
+
+The internal attack analysis and the exact independent-audit questions are in
+[`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md). It is preparation evidence, not
+a substitute for an audit report.
 
 ## Safe harbor
 

@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aiwork.network/specs/problem-spec-v1.schema.json",
+  "title": "AIWork ProblemSpec v1",
+  "description": "Portable charter for a funded, multi-contributor problem and its evidence policy.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "title",
+    "summary",
+    "description",
+    "domain",
+    "visibility",
+    "riskTier",
+    "license",
+    "verificationPolicy"
+  ],
+  "properties": {
+    "version": { "const": "1.0" },
+    "slug": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$", "maxLength": 180 },
+    "title": { "type": "string", "minLength": 8, "maxLength": 180 },
+    "summary": { "type": "string", "minLength": 20, "maxLength": 500 },
+    "description": { "type": "string", "minLength": 50, "maxLength": 50000 },
+    "domain": {
+      "enum": ["SOFTWARE", "MATHEMATICS", "DATA", "AI_ML", "RESEARCH", "BIOMEDICAL", "CLIMATE", "ENGINEERING", "POLICY", "OTHER"]
+    },
+    "visibility": { "enum": ["PUBLIC", "UNLISTED", "PRIVATE"] },
+    "riskTier": { "enum": ["LOW", "MODERATE", "HIGH", "RESTRICTED"] },
+    "tags": {
+      "type": "array",
+      "maxItems": 20,
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1, "maxLength": 40 }
+    },
+    "license": { "type": "string", "minLength": 1, "maxLength": 80 },
+    "funding": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "amount": { "type": "string", "pattern": "^[0-9]+(?:\\.[0-9]+)?$" },
+        "token": { "type": "string", "maxLength": 80 },
+        "mechanisms": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "enum": ["GRANT", "MILESTONE", "PRIZE", "REPLICATION_BOUNTY", "RETROACTIVE"] }
+        }
+      }
+    },
+    "verificationPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "minimumIndependentReviews", "replicationRequired"],
+      "properties": {
+        "mode": { "enum": ["CODE", "FORMAL_PROOF", "REPRODUCIBLE_RESEARCH", "EXPERT_PANEL", "HYBRID"] },
+        "minimumIndependentReviews": { "type": "integer", "minimum": 1, "maximum": 25 },
+        "replicationRequired": { "type": "boolean" },
+        "minimumReplications": { "type": "integer", "minimum": 0, "maximum": 25 },
+        "artifactRequirements": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "enum": ["SOURCE", "DATA", "METHODS", "ENVIRONMENT", "RESULTS", "LICENSE", "ETHICS_APPROVAL"] }
+        },
+        "acceptanceCriteria": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 50,
+          "items": { "type": "string", "minLength": 5, "maxLength": 1000 }
+        }
+      }
+    },
+    "governance": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "reviewerSelection": { "enum": ["RANDOM_CREDENTIALLED", "COMMUNITY", "INSTITUTIONAL", "HYBRID"] },
+        "appealsAllowed": { "type": "boolean" },
+        "conflictDisclosureRequired": { "type": "boolean" }
+      }
+    },
+    "ethics": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "humanSubjects": { "type": "boolean" },
+        "sensitiveData": { "type": "boolean" },
+        "dualUse": { "type": "boolean" },
+        "institutionalApprovalRequired": { "type": "boolean" },
+        "consentBasis": { "enum": ["INFORMED_CONSENT", "IRB_WAIVER", "SECONDARY_USE_APPROVED", "NOT_APPLICABLE"] },
+        "dataClassification": { "enum": ["PUBLIC", "INTERNAL", "CONTROLLED", "RESTRICTED"] },
+        "securityStandard": { "enum": ["NONE", "NIST_800_171", "NIST_800_53_MODERATE", "ISO_27001", "EQUIVALENT"] },
+        "highRiskLifeSciences": { "enum": ["NONE", "POTENTIAL_DGOF", "DGOF", "IROC"] },
+        "jurisdiction": { "type": "string", "minLength": 2, "maxLength": 120 },
+        "dataUseAgreementDigest": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" },
+        "mitigationPlanDigest": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" },
+        "requirements": { "type": "array", "items": { "type": "string", "maxLength": 500 } }
+      }
+    },
+    "metadata": { "type": "object" }
+  }
+}

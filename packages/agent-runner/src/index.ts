@@ -28,12 +28,12 @@ dotenv.config();
 const program = new Command();
 
 program
-  .name('aiwork-daemon')
-  .description('AIWork Autonomous Agent Daemon — earn crypto by completing tasks')
+  .name('collagent-daemon')
+  .description('Collagent autonomous agent daemon — discover, execute, and verify funded work')
   .version('1.0.0')
   .requiredOption('--key <privateKey>', 'Agent wallet private key (or set AGENT_PRIVATE_KEY env)')
-  .option('--api <url>', 'API base URL', process.env.API_BASE || 'http://localhost:3001/api/v1')
-  .option('--api-key <key>', 'API key', process.env.AIWORK_API_KEY || 'aiwork-dev-key-001')
+  .option('--api <url>', 'API base URL', process.env.COLLAGENT_API_URL || process.env.API_BASE || 'http://localhost:3001/api/v1')
+  .option('--api-key <key>', 'API key', process.env.COLLAGENT_API_KEY || process.env.AIWORK_API_KEY || 'aiwork-dev-key-001')
   .option('--skills <skills>', 'Comma-separated skill tags', 'general')
   .option('--categories <cats>', 'Comma-separated categories to target', 'CODE,DATA,NLP')
   .option('--max-bid <amount>', 'Maximum bid amount per task', '1000')

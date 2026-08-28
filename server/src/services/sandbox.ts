@@ -1,33 +1,29 @@
 /**
- * Sandbox Verification Service — Powered by Daytona
+ * Fail-closed task verification in an isolated Daytona sandbox.
  *
- * Replaces the quality-score stub with real isolated execution:
- *   1. Spin up a Daytona sandbox
- *   2. Clone the agent's Forgejo repo
- *   3. Install dependencies
- *   4. Run tests → testPassed (boolean)
- *   5. Run linter → lintPassed (boolean)
- *   6. Compute quality score from results
- *   7. Tear down sandbox
- *
- * Daytona modes:
- *   - Cloud: set DAYTONA_API_KEY env var (uses Daytona hosted infra)
- *   - Self-hosted: set DAYTONA_API_URL + DAYTONA_API_KEY
- *
- * Falls back to simulated verification if Daytona is not configured.
+ * A verification is bound to an immutable Git commit and an employer-owned
+ * TaskSpec. Command exit codes are authoritative; output text is diagnostic
+ * only. Production never falls back to simulated results.
  */
 
 import { pool } from "../db";
 
-// ─── Config ────────────────────────────────────────────────────
 const DAYTONA_API_KEY = process.env.DAYTONA_API_KEY || "";
-const DAYTONA_API_URL = process.env.DAYTONA_API_URL || undefined; // auto for cloud
-const FORGEJO_URL = process.env.FORGEJO_URL || "http://forgejo:3000";
-const FORGEJO_TOKEN = process.env.FORGEJO_ADMIN_TOKEN || "";
+const DAYTONA_API_URL = process.env.DAYTONA_API_URL || undefined;
+const FORGEJO_READ_TOKEN = process.env.FORGEJO_READ_TOKEN || process.env.FORGEJO_ADMIN_TOKEN || "";
+const TIMEOUT_SECONDS = Number(process.env.VERIFICATION_TIMEOUT_SECONDS || "180");
+const MAX_OUTPUT_BYTES = 5_000;
 
-const TIMEOUT_SECONDS = 120; // Max time for each command
+export interface VerificationRequest {
+  taskId: string;
+  chunkIndex: number;
+  repoUrl: string;
+  commitHash: string;
+  testCommand: string;
+  lintCommand?: string | null;
+  runtime?: string | null;
+}
 
-/** Result from sandbox verification */
 export interface VerificationResult {
   testPassed: boolean;
   lintPassed: boolean;
@@ -35,202 +31,225 @@ export interface VerificationResult {
   testOutput: string;
   lintOutput: string;
   executionTimeMs: number;
+  verifiedCommit: string;
   sandboxId?: string;
   mode: "daytona" | "simulated";
 }
 
-/**
- * Run verification in a Daytona sandbox.
- * Falls back to simulated if no API key is set.
- */
+const GIT_COMMIT_RE = /^[0-9a-f]{40}$/i;
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'"'"'`)}'`;
+}
+
+function languageForRuntime(runtime?: string | null): "typescript" | "python" {
+  return runtime === "python" ? "python" : "typescript";
+}
+
+function installCommand(runtime?: string | null): string {
+  switch (runtime) {
+    case "python":
+      return "if [ -f requirements.txt ]; then pip install --requirement requirements.txt; elif [ -f pyproject.toml ]; then pip install .; fi";
+    case "rust":
+      return "cargo fetch --locked";
+    case "go":
+      return "go mod download";
+    case "bun":
+      return "if [ -f bun.lock ] || [ -f bun.lockb ]; then bun install --frozen-lockfile; elif [ -f package.json ]; then bun install; fi";
+    default:
+      return "if [ -f bun.lock ] || [ -f bun.lockb ]; then bun install --frozen-lockfile; elif [ -f package-lock.json ]; then npm ci --ignore-scripts=false; elif [ -f package.json ]; then npm install --ignore-scripts=false; fi";
+  }
+}
+
+function validateRequest(request: VerificationRequest): void {
+  if (!request.taskId || request.chunkIndex < 0 || !Number.isInteger(request.chunkIndex)) {
+    throw new Error("Invalid verification task or chunk index");
+  }
+  if (!request.repoUrl) throw new Error("TaskSpec repoUrl is required");
+  if (!GIT_COMMIT_RE.test(request.commitHash)) {
+    throw new Error("commitHash must be a full 40-character Git commit SHA");
+  }
+  if (!request.testCommand?.trim()) {
+    throw new Error("TaskSpec testCommand is required; verification cannot be subjective");
+  }
+}
+
 export async function verifySandbox(
-  taskId: string,
-  chunkIndex: number,
-  repoUrl?: string
+  request: VerificationRequest
 ): Promise<VerificationResult> {
+  validateRequest(request);
+
   if (!DAYTONA_API_KEY) {
-    console.log("[SANDBOX] No DAYTONA_API_KEY — using simulated verification");
-    return simulatedVerify(taskId, chunkIndex);
+    return simulatedVerify(request);
   }
 
   const start = Date.now();
   let sandboxId: string | undefined;
+  let sandbox: any;
 
   try {
-    // Dynamic import to avoid crash when SDK is optional
     const { Daytona } = await import("@daytonaio/sdk");
-
     const daytona = new Daytona({
       apiKey: DAYTONA_API_KEY,
       ...(DAYTONA_API_URL ? { apiUrl: DAYTONA_API_URL } : {}),
     });
 
-    // 1. Create sandbox
-    console.log(`[SANDBOX] Creating sandbox for task ${taskId.slice(0, 16)}... chunk ${chunkIndex}`);
-    const sandbox = await daytona.create({
-      language: "typescript",
+    sandbox = await daytona.create({
+      language: languageForRuntime(request.runtime),
       envVars: {
         NODE_ENV: "test",
-        TASK_ID: taskId,
-        CHUNK_INDEX: String(chunkIndex),
+        CI: "true",
+        TASK_ID: request.taskId,
+        CHUNK_INDEX: String(request.chunkIndex),
+        AIWORK_VERIFICATION: "true",
       },
     });
     sandboxId = sandbox.id || "unknown";
-    console.log(`[SANDBOX] Created: ${sandboxId}`);
 
-    // 2. Clone the task repo
-    const cloneUrl = repoUrl || `${FORGEJO_URL}/aiwork/task-${taskId.slice(0, 16)}.git`;
-    const cloneResult = await sandbox.process.executeCommand(
-      `git clone ${cloneUrl} /workspace/task 2>&1 || echo 'CLONE_FAILED'`,
+    const authOption = FORGEJO_READ_TOKEN
+      ? `-c ${shellQuote(`http.extraHeader=Authorization: token ${FORGEJO_READ_TOKEN}`)}`
+      : "";
+    const clone = await sandbox.process.executeCommand(
+      `git ${authOption} clone --no-checkout -- ${shellQuote(request.repoUrl)} /workspace/task`,
       "/workspace",
       {},
       TIMEOUT_SECONDS
     );
-    console.log(`[SANDBOX] Clone: ${cloneResult.result?.slice(0, 100)}`);
+    if (clone.exitCode !== 0) {
+      throw new Error(`Repository clone failed: ${clone.result?.slice(-500) || "unknown error"}`);
+    }
 
-    // 3. Install dependencies
-    const installResult = await sandbox.process.executeCommand(
-      "cd /workspace/task && (bun install 2>&1 || npm install 2>&1 || echo 'INSTALL_OK')",
-      "/workspace",
+    const checkout = await sandbox.process.executeCommand(
+      `git checkout --detach ${request.commitHash}`,
+      "/workspace/task",
       {},
       TIMEOUT_SECONDS
     );
-    console.log(`[SANDBOX] Install: ${installResult.result?.slice(0, 100)}`);
+    if (checkout.exitCode !== 0) {
+      throw new Error(`Commit checkout failed: ${checkout.result?.slice(-500) || "unknown error"}`);
+    }
 
-    // 4. Run tests
-    let testPassed = false;
-    let testOutput = "";
-    try {
-      const testResult = await sandbox.process.executeCommand(
-        "cd /workspace/task && (bun test 2>&1 || npm test 2>&1)",
-        "/workspace",
+    const resolved = await sandbox.process.executeCommand(
+      "git rev-parse HEAD",
+      "/workspace/task",
+      {},
+      30
+    );
+    const verifiedCommit = resolved.result.trim().toLowerCase();
+    if (resolved.exitCode !== 0 || verifiedCommit !== request.commitHash.toLowerCase()) {
+      throw new Error(`Commit mismatch: requested ${request.commitHash}, resolved ${verifiedCommit || "none"}`);
+    }
+
+    const install = await sandbox.process.executeCommand(
+      installCommand(request.runtime),
+      "/workspace/task",
+      {},
+      TIMEOUT_SECONDS
+    );
+    if (install.exitCode !== 0) {
+      throw new Error(`Dependency installation failed: ${install.result?.slice(-500) || "unknown error"}`);
+    }
+
+    const test = await sandbox.process.executeCommand(
+      request.testCommand,
+      "/workspace/task",
+      {},
+      TIMEOUT_SECONDS
+    );
+    const testPassed = test.exitCode === 0;
+
+    let lintPassed = true;
+    let lintOutput = "No lint command configured";
+    if (request.lintCommand?.trim()) {
+      const lint = await sandbox.process.executeCommand(
+        request.lintCommand,
+        "/workspace/task",
         {},
         TIMEOUT_SECONDS
       );
-      testOutput = testResult.result || "";
-      // Check for common pass indicators
-      testPassed = testOutput.includes("pass") ||
-                   testOutput.includes("✓") ||
-                   testOutput.includes("PASS") ||
-                   !testOutput.includes("FAIL");
-    } catch (testErr: any) {
-      testOutput = testErr.message || "Test execution failed";
-      testPassed = false;
+      lintPassed = lint.exitCode === 0;
+      lintOutput = lint.result || "";
     }
 
-    // 5. Run linter
-    let lintPassed = false;
-    let lintOutput = "";
-    try {
-      const lintResult = await sandbox.process.executeCommand(
-        "cd /workspace/task && (npx biome check . 2>&1 || npx eslint . 2>&1 || echo 'NO_LINTER')",
-        "/workspace",
-        {},
-        TIMEOUT_SECONDS
-      );
-      lintOutput = lintResult.result || "";
-      lintPassed = !lintOutput.includes("error") || lintOutput.includes("NO_LINTER");
-    } catch (lintErr: any) {
-      lintOutput = lintErr.message || "Lint execution failed";
-      lintPassed = false;
-    }
-
-    // 6. Calculate quality score
-    let qualityScore = 50; // Base
-    if (testPassed) qualityScore += 30;
-    if (lintPassed) qualityScore += 20;
-    // Bonus for clean output
-    if (testOutput.includes("0 fail")) qualityScore = Math.min(100, qualityScore + 5);
-
-    console.log(`[SANDBOX] Results: test=${testPassed}, lint=${lintPassed}, score=${qualityScore}`);
-
-    // 7. Cleanup
-    try {
-      await sandbox.delete();
-      console.log(`[SANDBOX] Destroyed: ${sandboxId}`);
-    } catch (_) {
-      console.warn(`[SANDBOX] Cleanup failed for ${sandboxId}`);
-    }
+    // Tests are the payment gate. Lint affects quality but cannot rescue a
+    // failing test suite.
+    const qualityScore = testPassed ? (lintPassed ? 100 : 80) : (lintPassed ? 20 : 0);
 
     return {
       testPassed,
       lintPassed,
       qualityScore,
-      testOutput: testOutput.slice(0, 2000),
-      lintOutput: lintOutput.slice(0, 2000),
+      testOutput: (test.result || "").slice(-MAX_OUTPUT_BYTES),
+      lintOutput: lintOutput.slice(-MAX_OUTPUT_BYTES),
       executionTimeMs: Date.now() - start,
+      verifiedCommit,
       sandboxId,
       mode: "daytona",
     };
   } catch (err: any) {
-    console.error(`[SANDBOX] Daytona failed: ${err.message} — falling back to simulated`);
-    return simulatedVerify(taskId, chunkIndex);
+    if (process.env.NODE_ENV === "production") throw err;
+    console.error(`[SANDBOX] Daytona failed in development: ${err.message}`);
+    return simulatedVerify(request);
+  } finally {
+    if (sandbox) {
+      await sandbox.delete().catch((err: any) => {
+        console.warn(`[SANDBOX] Cleanup failed for ${sandboxId}: ${err.message}`);
+      });
+    }
   }
 }
 
-/**
- * Simulated verification — DEV-ONLY fallback when Daytona is not configured.
- *
- * Earlier versions emitted a randomized 70-100 quality score, which always
- * cleared the queue worker's 70 threshold and auto-approved every submission
- * (silently masking real verification bugs and triggering escrow payouts on
- * any push). This version:
- *   • refuses to run if NODE_ENV === 'production'
- *   • logs a loud warning so reviewers know dev mode is active
- *   • returns deterministic fields — qualityScore=85, testsPassed=true
- *     so unit tests and demos are reproducible
- */
+/** Deterministic local-only fixture. It is deliberately marked simulated. */
 async function simulatedVerify(
-  taskId: string,
-  chunkIndex: number
+  request: VerificationRequest
 ): Promise<VerificationResult> {
   if (process.env.NODE_ENV === "production") {
-    throw new Error(
-      "[SANDBOX] simulatedVerify must never run in production — configure DAYTONA_API_KEY"
-    );
+    throw new Error("DAYTONA_API_KEY is required for production verification");
   }
 
   console.warn(
-    `[DEV-ONLY] simulatedVerify: returning fixed quality=85 for testing (task=${taskId.slice(0, 16)}... chunk=${chunkIndex})`
+    `[DEV-ONLY] Simulated verification for ${request.taskId} chunk ${request.chunkIndex}; no payment should rely on this result`
   );
-
-  const start = Date.now();
-
   return {
     testPassed: true,
     lintPassed: true,
-    qualityScore: 85,
-    testOutput: "DEV-ONLY simulated verification (deterministic)",
-    lintOutput: "DEV-ONLY simulated verification (deterministic)",
-    executionTimeMs: Date.now() - start,
+    qualityScore: 100,
+    testOutput: "DEV-ONLY deterministic verification",
+    lintOutput: "DEV-ONLY deterministic verification",
+    executionTimeMs: 0,
+    verifiedCommit: request.commitHash.toLowerCase(),
     mode: "simulated",
   };
 }
 
-/**
- * Record verification result to the database.
- */
 export async function recordVerification(
-  taskId: string,
-  chunkIndex: number,
-  result: VerificationResult
-): Promise<void> {
-  await pool.query(
+  request: VerificationRequest,
+  result: VerificationResult,
+  evidenceHash?: string
+): Promise<number> {
+  const status = result.mode === "simulated"
+    ? "SIMULATED"
+    : result.testPassed && result.qualityScore >= 70 ? "COMPLETED" : "FAILED";
+  const { rows } = await pool.query(
     `INSERT INTO verification_jobs
-       (task_id, chunk_index, status, test_passed, lint_passed, quality_score, sandbox_id, stdout, stderr, duration_ms, completed_at, created_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())
-     ON CONFLICT DO NOTHING`,
+       (task_id, chunk_index, status, exit_code, test_passed, lint_passed,
+        quality_score, sandbox_id, stdout, stderr, duration_ms, evidence_hash, completed_at, created_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW(), NOW())
+     RETURNING id`,
     [
-      taskId,
-      chunkIndex,
-      result.qualityScore >= 70 ? "COMPLETED" : "FAILED",
+      request.taskId,
+      request.chunkIndex,
+      status,
+      result.testPassed ? 0 : 1,
       result.testPassed,
       result.lintPassed,
       result.qualityScore,
       result.sandboxId || null,
-      result.testOutput.slice(0, 5000),
-      result.lintOutput.slice(0, 5000),
+      result.testOutput,
+      result.lintOutput,
       result.executionTimeMs,
+      evidenceHash || null,
     ]
   );
+  return Number(rows[0].id);
 }

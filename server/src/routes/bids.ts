@@ -4,66 +4,59 @@
  */
 
 import { Hono } from "hono";
-import {
-  publicClient,
-  walletClient,
-  CONTRACTS,
-  BIDDING_ENGINE_ABI,
-  account,
-} from "../services/blockchain";
-import { parseEther } from "viem";
-import { insertBid, getBidsByTask, insertActivity } from "../db";
+import { insertBid, getBidsByTask, insertActivity, pool } from "../db";
 import { authMiddleware } from "../middleware/auth";
+import { requireRole } from "../middleware/roles";
+import type { AppEnv } from "../types";
 
-export const bidRoutes = new Hono();
-
-const biddingEngineDeployed = () =>
-  CONTRACTS.biddingEngine !== "0x0000000000000000000000000000000000000000";
+export const bidRoutes = new Hono<AppEnv>();
 
 // ─── Submit Bid (Protected) ────────────────────────────────────
-bidRoutes.post("/:taskId", authMiddleware, async (c) => {
-  const taskId = c.req.param("taskId");
+bidRoutes.post("/:taskId", authMiddleware, requireRole("agent"), async (c) => {
+  const taskId = c.req.param("taskId")!;
   const body = await c.req.json();
-  const { agentAddress, agentId, amount, estimatedHours, modelScore } = body;
+  const { agentAddress, agentId, amount, estimatedHours } = body;
 
-  if (!agentAddress || !amount) {
-    return c.json({ error: "Missing required: agentAddress, amount" }, 400);
+  if (!agentAddress || !agentId || !amount) {
+    return c.json({ error: "Missing required: agentAddress, agentId, amount" }, 400);
   }
 
-  let txHash: string | undefined;
-
-  // Try on-chain submission if BiddingEngine is deployed
-  if (biddingEngineDeployed()) {
-    try {
-      txHash = await walletClient.writeContract({
-        address: CONTRACTS.biddingEngine,
-        abi: BIDDING_ENGINE_ABI,
-        functionName: "submitBid",
-        args: [
-          taskId as `0x${string}`,
-          agentId || "",
-          parseEther(amount.toString()),
-          BigInt(estimatedHours || 24),
-          BigInt(modelScore || 50),
-        ],
-        value: parseEther("0.001"),
-      });
-    } catch (err: any) {
-      console.warn("[BIDS] On-chain bid failed, saving to DB only:", err.message);
+  if (c.get("role") !== "admin") {
+    const authenticatedAgent = c.get("agentId") as string | undefined;
+    const authenticatedWallet = c.get("walletAddress") as string | undefined;
+    if (authenticatedAgent !== agentId || authenticatedWallet?.toLowerCase() !== agentAddress.toLowerCase()) {
+      return c.json({ error: "Bid identity must match the authenticated API key or wallet" }, 403);
     }
   }
 
-  // Always persist to PostgreSQL
   try {
+    const numericAmount = Number(amount);
+    const numericHours = Number(estimatedHours || 24);
+    if (!Number.isFinite(numericAmount) || numericAmount <= 0 || !Number.isFinite(numericHours) || numericHours <= 0) {
+      return c.json({ error: "amount and estimatedHours must be positive numbers" }, 400);
+    }
+    const { rows: tasks } = await pool.query(
+      "SELECT max_budget, phase, bidding_ends FROM tasks WHERE task_id = $1 LIMIT 1",
+      [taskId]
+    );
+    if (tasks.length === 0) return c.json({ error: "Task not found" }, 404);
+    if (!["OPEN", "POSTED", "BIDDING"].includes(tasks[0].phase)) {
+      return c.json({ error: "Task is not accepting bids" }, 409);
+    }
+    if (tasks[0].bidding_ends && new Date(tasks[0].bidding_ends).getTime() <= Date.now()) {
+      return c.json({ error: "Bidding window has closed; task is awaiting award" }, 409);
+    }
+    if (numericAmount > Number(tasks[0].max_budget)) {
+      return c.json({ error: "Bid exceeds the task budget" }, 400);
+    }
+
     const bid = await insertBid({
       taskId,
-      agentId: agentId || "",
+      agentId,
       agentAddress,
       amount: amount.toString(),
-      estimatedHours: estimatedHours || 24,
-      modelScore: modelScore || 50,
+      estimatedHours: numericHours,
       reputation: "NEW",
-      txHash,
     });
 
     // Record activity
@@ -72,15 +65,14 @@ bidRoutes.post("/:taskId", authMiddleware, async (c) => {
       agent: agentAddress.slice(0, 10) + "...",
       message: `bid ${amount} AIWK on task ${taskId.slice(0, 10)}...`,
       taskId,
-      txHash,
     });
 
     return c.json({
       success: true,
       bid,
-      txHash: txHash || null,
-      onChain: !!txHash,
-      message: txHash ? "Bid submitted on-chain + DB" : "Bid stored in DB (chain unavailable)",
+      onChain: false,
+      settlement: "offchain_bid_onchain_award",
+      message: "Bid accepted; award and escrow settlement are finalized on-chain",
     }, 201);
   } catch (err: any) {
     return c.json({ error: err.message }, 500);
@@ -93,52 +85,38 @@ bidRoutes.get("/:taskId", async (c) => {
 
   try {
     // Read from PostgreSQL first (fast, indexed)
-    const dbBids = await getBidsByTask(taskId);
+    const [dbBids, state] = await Promise.all([
+      getBidsByTask(taskId),
+      pool.query("SELECT phase, bidding_ends FROM tasks WHERE task_id = $1 LIMIT 1", [taskId]),
+    ]);
+    const task = state.rows[0];
+    const biddingOpen = !!task
+      && ["OPEN", "POSTED", "BIDDING"].includes(task.phase)
+      && (!task.bidding_ends || new Date(task.bidding_ends).getTime() > Date.now());
 
     if (dbBids.length > 0) {
       return c.json({
         taskId,
-        biddingOpen: true,
+        biddingOpen,
         totalBids: dbBids.length,
         bids: dbBids.map((b: any) => ({
           agentAddress: b.bidder_address,
           agentId: b.agent_id,
           amount: b.bid_price,
-          agentReputation: b.model_score ? `${b.model_score}%` : "NEW",
+          agentReputation: b.agent_reputation == null ? "NEW" : `${(Number(b.agent_reputation) / 100).toFixed(1)}%`,
           timestamp: new Date(b.submitted_at).getTime(),
           estimatedHours: b.estimated_hours,
           onChain: !!b.tx_hash,
+          isAwarded: !!b.is_awarded,
         })),
         source: "database",
       });
     }
 
-    // Fallback: try reading from chain if DB is empty
-    if (biddingEngineDeployed()) {
-      const count = await publicClient.readContract({
-        address: CONTRACTS.biddingEngine,
-        abi: BIDDING_ENGINE_ABI,
-        functionName: "getBidCount",
-        args: [taskId as `0x${string}`],
-      }) as bigint;
-
-      if (Number(count) > 0) {
-        // Chain has bids, DB doesn't — this is an indexing gap
-        return c.json({
-          taskId,
-          biddingOpen: true,
-          totalBids: Number(count),
-          bids: [],
-          source: "chain_count_only",
-          message: "Bids exist on-chain but are not yet indexed. Run sync.",
-        });
-      }
-    }
-
     // No bids anywhere
     return c.json({
       taskId,
-      biddingOpen: true,
+      biddingOpen,
       totalBids: 0,
       bids: [],
       source: "empty",
@@ -153,33 +131,21 @@ bidRoutes.get("/:taskId/status", async (c) => {
   const taskId = c.req.param("taskId");
 
   try {
-    const dbBids = await getBidsByTask(taskId);
-
-    if (biddingEngineDeployed()) {
-      try {
-        const count = await publicClient.readContract({
-          address: CONTRACTS.biddingEngine,
-          abi: BIDDING_ENGINE_ABI,
-          functionName: "getBidCount",
-          args: [taskId as `0x${string}`],
-        }) as bigint;
-
-        return c.json({
-          taskId,
-          biddingOpen: true,
-          totalBids: Math.max(Number(count), dbBids.length),
-          dbBids: dbBids.length,
-          chainBids: Number(count),
-        });
-      } catch {}
-    }
+    const [dbBids, state] = await Promise.all([
+      getBidsByTask(taskId),
+      pool.query("SELECT phase, bidding_ends FROM tasks WHERE task_id = $1 LIMIT 1", [taskId]),
+    ]);
+    const task = state.rows[0];
+    const biddingOpen = !!task
+      && ["OPEN", "POSTED", "BIDDING"].includes(task.phase)
+      && (!task.bidding_ends || new Date(task.bidding_ends).getTime() > Date.now());
 
     return c.json({
       taskId,
-      biddingOpen: true,
+      biddingOpen,
       totalBids: dbBids.length,
       dbBids: dbBids.length,
-      chainBids: 0,
+      settlement: "offchain_bid_onchain_award",
     });
   } catch (err: any) {
     return c.json({ error: err.message }, 500);

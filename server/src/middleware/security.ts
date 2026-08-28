@@ -2,12 +2,13 @@
  * Security Middleware — Audit logging, input sanitization, CSRF protection
  *
  * Every mutating operation (POST/PUT/DELETE) is recorded in audit_log.
- * All inputs are sanitized against XSS and SQL injection patterns.
+ * Inputs receive structural, size, null-byte, and identifier validation.
  */
 
-import { Context, Next } from "hono";
+import type { Context, Next } from "hono";
+import { createHash } from "node:crypto";
+import type { AppEnv } from "../types";
 import { pool } from "../db";
-import { createHash } from "crypto";
 
 // ─── Audit Logger ──────────────────────────────────────────────
 /**
@@ -70,25 +71,24 @@ function deriveResourceType(path: string): string {
 // ─── Input Sanitization ────────────────────────────────────────
 /**
  * Validates and sanitizes request bodies to prevent:
- * - SQL injection patterns
- * - XSS payloads
  * - Oversized inputs
  * - Invalid hex addresses
  */
 const DANGEROUS_PATTERNS = [
-  /(\b(SELECT|INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|EXEC|UNION)\b.*\b(FROM|INTO|TABLE|SET)\b)/i,
-  /<script\b[^>]*>(.*?)<\/script>/i,
-  /javascript:/i,
-  /on(click|load|error|mouseover)\s*=/i,
   /\0/, // Null bytes
 ];
 
-const MAX_STRING_LENGTH = 4096;
+const MAX_STRING_LENGTH = 100_000;
 const WALLET_REGEX = /^0x[0-9a-fA-F]{40}$/;
 const TASK_ID_REGEX = /^0x[0-9a-fA-F]{64}$/;
 
 export async function sanitizeMiddleware(c: Context, next: Next) {
   if (c.req.method === "GET" || c.req.method === "HEAD") return next();
+
+  // Preserve a digest of the exact wire body before any parser consumes it.
+  // Wallet authentication later binds its signature to this value.
+  const rawBody = await c.req.raw.clone().text();
+  c.set("requestBodySha256", createHash("sha256").update(rawBody).digest("hex"));
 
   // Check Content-Type for POST requests
   const contentType = c.req.header("content-type") || "";
@@ -107,8 +107,8 @@ export async function sanitizeMiddleware(c: Context, next: Next) {
 
     // Check total payload size
     const bodyStr = JSON.stringify(body);
-    if (bodyStr.length > 50_000) {
-      return c.json({ error: "Request body too large (max 50KB)" }, 413);
+    if (bodyStr.length > 256_000) {
+      return c.json({ error: "Request body too large (max 256KB)" }, 413);
     }
 
     // Recursive sanitization
@@ -196,7 +196,7 @@ export async function securityHeaders(c: Context, next: Next) {
 
 // ─── CORS hardening ────────────────────────────────────────────
 const ALLOWED_ORIGINS = new Set(
-  (process.env.ALLOWED_ORIGINS || "http://localhost:5173,http://localhost,http://aiwork.network")
+  (process.env.ALLOWED_ORIGINS || "http://localhost:5173,http://localhost")
     .split(",")
     .map((s) => s.trim())
 );
@@ -221,7 +221,7 @@ export async function corsMiddleware(c: Context, next: Next) {
   c.header("Access-Control-Max-Age", "86400");
 
   if (c.req.method === "OPTIONS") {
-    return c.text("", 204);
+    return c.body(null, 204);
   }
 
   return next();

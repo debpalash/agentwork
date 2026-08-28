@@ -13,15 +13,20 @@ import {
   submitStep,
   getAgentNotifications,
 } from "../services/lifecycle";
-import { keccak256, toHex, parseEther } from "viem";
-import { pool } from "../db";
+import { keccak256, toHex, parseUnits, formatUnits } from "viem";
+import { pool, upsertTask } from "../db";
+import { authMiddleware } from "../middleware/auth";
+import { requireRole } from "../middleware/roles";
+import { forgejo } from "../services/forgejo";
+import type { AppEnv } from "../types";
 
-export const taskRoutes = new Hono();
+export const taskRoutes = new Hono<AppEnv>();
+const PAYMENT_TOKEN_DECIMALS = Number(process.env.PAYMENT_TOKEN_DECIMALS || "18");
 
 // ─── Store/Update Task Spec (Postgres-backed task_specs table) ──────
 // Keeps the API shape stable. Reject literal "null"/missing IDs explicitly so
 // we never silently collide specs again.
-taskRoutes.post("/:taskId/spec", async (c) => {
+taskRoutes.post("/:taskId/spec", authMiddleware, requireRole("employer", "agent"), async (c) => {
   const taskId = c.req.param("taskId");
   if (!taskId || taskId === "null" || taskId === "undefined") {
     return c.json({ error: "invalid taskId" }, 400);
@@ -30,27 +35,105 @@ taskRoutes.post("/:taskId/spec", async (c) => {
   spec.taskId = taskId;
   spec.version = "2.0";
 
+  if (!spec.testCommand?.trim() && !spec.test_command?.trim()) {
+    return c.json({ error: "testCommand is required for objective verification" }, 400);
+  }
+  const biddingHours = Number(spec.biddingHours ?? spec.bidding_hours ?? 4);
+  if (!Number.isFinite(biddingHours) || biddingHours < 1 || biddingHours > 168) {
+    return c.json({ error: "biddingHours must be between 1 and 168" }, 400);
+  }
+  const requestedEnv = spec.envVars || spec.env_vars || {};
+  if (Object.keys(requestedEnv).length > 0) {
+    return c.json({ error: "Task-supplied environment secrets are not supported; use a platform-managed secret reference" }, 400);
+  }
+
+  const { rows: existingSpecs } = await pool.query(
+    `SELECT test_command, lint_command, runtime FROM task_specs WHERE task_id = $1 LIMIT 1`,
+    [taskId]
+  );
+  if (existingSpecs.length > 0) {
+    const existing = existingSpecs[0];
+    const same = existing.test_command === (spec.testCommand || spec.test_command)
+      && (existing.lint_command || "") === (spec.lintCommand || spec.lint_command || "")
+      && (existing.runtime || "") === (spec.runtime || "");
+    if (!same) return c.json({ error: "Task verification specifications are immutable once stored" }, 409);
+    return c.json({ success: true, taskId, immutable: true, message: "TaskSpec already stored" });
+  }
+
   try {
+    const task = await publicClient.readContract({
+      address: CONTRACTS.taskManager,
+      abi: TASK_MANAGER_ABI,
+      functionName: "getTask",
+      args: [taskId as `0x${string}`],
+    }) as unknown as any[];
+
+    const walletAddress = c.get("walletAddress") as string | undefined;
+    if (c.get("role") !== "admin" && (!walletAddress || task[1].toLowerCase() !== walletAddress.toLowerCase())) {
+      return c.json({ error: "Only the task employer may define its verification spec" }, 403);
+    }
+
+    const rawSteps = await publicClient.readContract({
+      address: CONTRACTS.taskManager,
+      abi: TASK_MANAGER_ABI,
+      functionName: "getTaskSteps",
+      args: [taskId as `0x${string}`],
+    }) as unknown as any[];
+
+    // Provision the immutable work repository before accepting a spec. Retry
+    // behavior is handled by the Forgejo service.
+    const repo = await forgejo.createTaskRepo(taskId, task[3]);
+
+    await upsertTask({
+      taskId,
+      employer: task[1],
+      title: task[3],
+      category: task[4],
+      phase: "OPEN",
+      maxBudget: formatUnits(task[7], PAYMENT_TOKEN_DECIMALS),
+      bonusPool: formatUnits(task[8], PAYMENT_TOKEN_DECIMALS),
+      deadline: Number(task[11]),
+      biddingEnds: Math.floor(Date.now() / 1000 + biddingHours * 3600),
+      totalChunks: Number(task[15]),
+      description: spec.description || "",
+      txHash: spec.txHash || "",
+    });
+
+    await pool.query("UPDATE tasks SET repo_slug = $1 WHERE task_id = $2", [repo.repoSlug, taskId]);
+    for (let index = 0; index < rawSteps.length; index++) {
+      const step = rawSteps[index];
+      await pool.query(
+        `INSERT INTO chunks (task_id, chunk_index, description, percentage_bps)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (task_id, chunk_index) DO UPDATE SET
+           description = EXCLUDED.description,
+           percentage_bps = EXCLUDED.percentage_bps`,
+        [taskId, index, step[0], Number(step[1])]
+      );
+    }
+
     await pool.query(
       `INSERT INTO task_specs (task_id, repo_url, test_command, lint_command, runtime, env_vars, acceptance)
        VALUES ($1, $2, $3, $4, $5, $6, $7)
-       ON CONFLICT (task_id) DO UPDATE SET
-         repo_url = EXCLUDED.repo_url,
-         test_command = EXCLUDED.test_command,
-         lint_command = EXCLUDED.lint_command,
-         runtime = EXCLUDED.runtime,
-         env_vars = EXCLUDED.env_vars,
-         acceptance = EXCLUDED.acceptance`,
+       ON CONFLICT (task_id) DO NOTHING`,
       [
         taskId,
-        spec.repoUrl || spec.repo_url || null,
+        repo.cloneUrl,
         spec.testCommand || spec.test_command || null,
         spec.lintCommand || spec.lint_command || null,
         spec.runtime || null,
-        JSON.stringify(spec.envVars || spec.env_vars || {}),
+        JSON.stringify({}),
         JSON.stringify(spec.acceptance || spec),
       ]
     );
+
+    await forgejo.seedTaskRepo(
+      taskId,
+      { ...spec, title: task[3], category: task[4], maxBudget: formatUnits(task[7], PAYMENT_TOKEN_DECIMALS), deadline: Number(task[11]) },
+      rawSteps.map((step: any) => ({ description: step[0], percentageBPS: Number(step[1]) }))
+    );
+    const { scheduleBiddingDeadline } = await import("../services/queue");
+    await scheduleBiddingDeadline(taskId, task[3], biddingHours);
   } catch (err: any) {
     return c.json({ error: `Failed to store spec: ${err.message}` }, 500);
   }
@@ -92,7 +175,7 @@ taskRoutes.get("/:taskId/spec", async (c) => {
       abi: TASK_MANAGER_ABI,
       functionName: "getTask",
       args: [taskId as `0x${string}`],
-    }) as any[];
+    }) as unknown as any[];
 
     return c.json({
       taskId,
@@ -124,7 +207,9 @@ taskRoutes.get("/:taskId/spec", async (c) => {
 });
 
 // ─── Post a New Task ───────────────────────────────────────────
-taskRoutes.post("/", async (c) => {
+// Custodial/operator endpoint. End users post directly from their wallet so
+// the employer address and escrow approval remain self-custodied.
+taskRoutes.post("/", authMiddleware, requireRole("admin"), async (c) => {
   const body = await c.req.json();
   const {
     title,
@@ -159,8 +244,8 @@ taskRoutes.post("/", async (c) => {
         category,
         paymentModel,
         paymentToken,
-        parseEther(baseReward.toString()),
-        parseEther(bonusPool.toString()),
+        parseUnits(baseReward.toString(), PAYMENT_TOKEN_DECIMALS),
+        parseUnits(bonusPool.toString(), PAYMENT_TOKEN_DECIMALS),
         BigInt(complexityClaim),
         deadline,
         requirementsHash,
@@ -189,7 +274,7 @@ taskRoutes.get("/:taskId", async (c) => {
       abi: TASK_MANAGER_ABI,
       functionName: "getTask",
       args: [taskId],
-    }) as any[];
+    }) as unknown as any[];
 
     const paymentModels = ["FULL_COMPLETION", "STEP_BASED", "FRACTIONAL", "HYBRID"];
     const statuses = [
@@ -205,7 +290,7 @@ taskRoutes.get("/:taskId", async (c) => {
         abi: TASK_MANAGER_ABI,
         functionName: "getTaskSteps",
         args: [taskId],
-      }) as any[];
+      }) as unknown as any[];
 
       steps = rawSteps.map((s: any, i: number) => ({
         stepNumber: i,
@@ -225,7 +310,7 @@ taskRoutes.get("/:taskId", async (c) => {
       abi: ESCROW_ABI,
       functionName: "getEscrow",
       args: [taskId],
-    }) as any[];
+    }) as unknown as any[];
 
     return c.json({
       taskId: task[0],
@@ -260,7 +345,7 @@ taskRoutes.get("/:taskId", async (c) => {
 });
 
 // ─── Assign Agent to Task ──────────────────────────────────────
-taskRoutes.post("/:taskId/assign", async (c) => {
+taskRoutes.post("/:taskId/assign", authMiddleware, requireRole("admin"), async (c) => {
   const taskId = c.req.param("taskId") as `0x${string}`;
   const { agentId } = await c.req.json();
 
@@ -279,7 +364,7 @@ taskRoutes.post("/:taskId/assign", async (c) => {
 });
 
 // ─── Submit Step ───────────────────────────────────────────────
-taskRoutes.post("/:taskId/steps/:stepNum/submit", async (c) => {
+taskRoutes.post("/:taskId/steps/:stepNum/submit", authMiddleware, requireRole("admin"), async (c) => {
   const taskId = c.req.param("taskId") as `0x${string}`;
   const stepNum = Number(c.req.param("stepNum"));
   const { deliverable } = await c.req.json();
@@ -301,7 +386,7 @@ taskRoutes.post("/:taskId/steps/:stepNum/submit", async (c) => {
 });
 
 // ─── Verify Step ───────────────────────────────────────────────
-taskRoutes.post("/:taskId/steps/:stepNum/verify", async (c) => {
+taskRoutes.post("/:taskId/steps/:stepNum/verify", authMiddleware, requireRole("admin"), async (c) => {
   const taskId = c.req.param("taskId") as `0x${string}`;
   const stepNum = Number(c.req.param("stepNum"));
   const { approved, qualityScore } = await c.req.json();
@@ -321,7 +406,7 @@ taskRoutes.post("/:taskId/steps/:stepNum/verify", async (c) => {
 });
 
 // ─── Submit Full Completion ────────────────────────────────────
-taskRoutes.post("/:taskId/complete", async (c) => {
+taskRoutes.post("/:taskId/complete", authMiddleware, requireRole("admin"), async (c) => {
   const taskId = c.req.param("taskId") as `0x${string}`;
   const { deliverable } = await c.req.json();
 
@@ -342,7 +427,7 @@ taskRoutes.post("/:taskId/complete", async (c) => {
 });
 
 // ─── Verify Full Completion ────────────────────────────────────
-taskRoutes.post("/:taskId/verify", async (c) => {
+taskRoutes.post("/:taskId/verify", authMiddleware, requireRole("admin"), async (c) => {
   const taskId = c.req.param("taskId") as `0x${string}`;
   const { approved, qualityScore } = await c.req.json();
 
@@ -361,7 +446,7 @@ taskRoutes.post("/:taskId/verify", async (c) => {
 });
 
 // ─── Cancel Task ───────────────────────────────────────────────
-taskRoutes.post("/:taskId/cancel", async (c) => {
+taskRoutes.post("/:taskId/cancel", authMiddleware, requireRole("admin"), async (c) => {
   const taskId = c.req.param("taskId") as `0x${string}`;
 
   try {
@@ -411,7 +496,7 @@ taskRoutes.get("/", async (c) => {
             abi: TASK_MANAGER_ABI,
             functionName: "getTask",
             args: [taskId],
-          }) as any[];
+          }) as unknown as any[];
 
           // Check if DB has a newer phase for this task
           const { rows: dbRows } = await pool.query(
@@ -425,10 +510,10 @@ taskRoutes.get("/", async (c) => {
             poster: taskData[1],
             agent: resolveAgent(dbRows, taskData),
             title: taskData[3],
-            category: ["CODE", "NLP", "DATA", "VISION", "CREATIVE", "REASONING"][Number(taskData[4])] || "GENERIC",
+            category: taskData[4] || "GENERIC",
             paymentModel: paymentModels[Number(taskData[5])],
-            phase: dbPhase ? dbPhase.toLowerCase() : statuses[Number(taskData[6])].toLowerCase(),
-            reward: `${(Number(taskData[7]) / 1e18).toFixed(2)} USDC`,
+            phase: dbPhase ? dbPhase.toLowerCase() : (statuses[Number(taskData[6])] || "UNKNOWN").toLowerCase(),
+            reward: `${formatUnits(taskData[7], PAYMENT_TOKEN_DECIMALS)} USDC`,
             chunks: dbRows[0]
               ? `${dbRows[0].verified_chunks}/${dbRows[0].total_chunks}`
               : `${Number(taskData[14])}/${Number(taskData[15])}`,
@@ -481,8 +566,16 @@ function resolveAgent(rows: any[], taskData: any[]) {
 // ═══════════════════════════════════════════════════════════════
 // LIFECYCLE: Award Task — close bidding, select winner
 // ═══════════════════════════════════════════════════════════════
-taskRoutes.post("/:taskId/award", async (c) => {
-  const taskId = c.req.param("taskId");
+taskRoutes.post("/:taskId/award", authMiddleware, requireRole("employer", "agent"), async (c) => {
+  const taskId = c.req.param("taskId")!;
+
+  if (c.get("role") !== "admin") {
+    const walletAddress = c.get("walletAddress") as string | undefined;
+    const { rows } = await pool.query("SELECT employer FROM tasks WHERE task_id = $1 LIMIT 1", [taskId]);
+    if (!walletAddress || rows.length === 0 || rows[0].employer.toLowerCase() !== walletAddress.toLowerCase()) {
+      return c.json({ error: "Only the task employer may award this task" }, 403);
+    }
+  }
 
   const result = await awardTask(taskId);
 
@@ -494,6 +587,7 @@ taskRoutes.post("/:taskId/award", async (c) => {
     success: true,
     taskId,
     winner: result.winner,
+    txHash: result.txHash,
     message: `Task awarded to ${result.winner}`,
   });
 });
@@ -501,13 +595,17 @@ taskRoutes.post("/:taskId/award", async (c) => {
 // ═══════════════════════════════════════════════════════════════
 // LIFECYCLE: Submit Step — agent submits deliverable
 // ═══════════════════════════════════════════════════════════════
-taskRoutes.post("/:taskId/submit", async (c) => {
-  const taskId = c.req.param("taskId");
+taskRoutes.post("/:taskId/submit", authMiddleware, requireRole("agent"), async (c) => {
+  const taskId = c.req.param("taskId")!;
   const body = await c.req.json();
   const { chunkIndex, agentId, commitHash } = body;
 
-  if (chunkIndex === undefined || !agentId) {
-    return c.json({ error: "chunkIndex and agentId required" }, 400);
+  if (chunkIndex === undefined || !agentId || !commitHash) {
+    return c.json({ error: "chunkIndex, agentId, and full commitHash required" }, 400);
+  }
+  const authenticatedAgent = c.get("agentId") as string | undefined;
+  if (c.get("role") !== "admin" && authenticatedAgent !== agentId) {
+    return c.json({ error: "agentId must match the authenticated agent" }, 403);
   }
 
   const result = await submitStep(taskId, chunkIndex, agentId, commitHash);
@@ -520,18 +618,19 @@ taskRoutes.post("/:taskId/submit", async (c) => {
     success: true,
     taskId,
     chunkIndex,
-    verified: result.verified,
-    message: result.verified
-      ? "Chunk submitted and verified ✓"
-      : "Chunk submitted, pending manual review",
+    queued: result.queued,
+    message: "Chunk submission queued for exact-commit verification",
   });
 });
 
 // ═══════════════════════════════════════════════════════════════
 // NOTIFICATIONS: Agent polls for updates
 // ═══════════════════════════════════════════════════════════════
-taskRoutes.get("/notifications/:agentId", async (c) => {
-  const agentId = c.req.param("agentId");
+taskRoutes.get("/notifications/:agentId", authMiddleware, requireRole("agent"), async (c) => {
+  const agentId = c.req.param("agentId")!;
+  if (c.get("role") !== "admin" && c.get("agentId") !== agentId) {
+    return c.json({ error: "Notifications may only be read by their owning agent" }, 403);
+  }
   const since = c.req.query("since");
 
   const notifications = await getAgentNotifications(agentId, since);

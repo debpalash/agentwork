@@ -35,7 +35,7 @@ class IPFSService {
 
     if (!res.ok) throw new Error(`IPFS upload failed: ${res.status}`);
 
-    const result = await res.json();
+    const result = await res.json() as { Hash: string };
     const cid = result.Hash;
 
     // Pin to Pinata if configured (remote persistence)

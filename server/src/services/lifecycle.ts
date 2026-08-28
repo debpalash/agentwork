@@ -1,123 +1,196 @@
 /**
- * Task Lifecycle Service
+ * Off-chain coordination for the canonical TaskManager V1 lifecycle.
  *
- * Manages the full task lifecycle:
- *   POSTED → BIDDING → AWARDED → EXECUTING → SUBMITTED → VERIFIED → PAID
- *
- * Core loops:
- *   1. Award:    Close bidding → score bids → assign winner → notify
- *   2. Verify:   Agent submits chunk → run checks → approve/reject
- *   3. Pay:      Verification passes → release escrow → update DB
- *   4. Reputation: Task completes → update agent stats on-chain + DB
+ * Economic state changes are finalized on-chain first. PostgreSQL contains
+ * searchable bids, repository state, verification evidence, and notifications.
  */
 
-import {
-  publicClient,
-  walletClient,
-  account,
-  CONTRACTS,
-  TASK_MANAGER_ABI,
-  AGENT_REGISTRY_ABI,
-  BIDDING_ENGINE_ABI,
-} from "./blockchain";
-import {
-  pool,
-  insertActivity,
-  getTaskById,
-  upsertTask,
-  upsertAgent,
-  getAgentByWallet,
-} from "../db";
+import { publicClient, walletClient, CONTRACTS, TASK_MANAGER_ABI } from "./blockchain";
+import { pool, insertActivity } from "../db";
+import { randomUUID } from "node:crypto";
 
-// ═══════════════════════════════════════════════════════════════
-// 1. AWARD — Select winner from bids
-// ═══════════════════════════════════════════════════════════════
 export async function awardTask(taskId: string): Promise<{
   success: boolean;
   winner?: string;
+  txHash?: string;
   error?: string;
 }> {
+  const operationKey = `task-award:${taskId}`;
+  let operation: any;
+  const prepare = await pool.connect();
   try {
-    // Get bids from DB
-    const { rows: bids } = await pool.query(
-      "SELECT * FROM bids WHERE task_id = $1 ORDER BY bid_price ASC",
+    await prepare.query("BEGIN");
+    await prepare.query("SELECT pg_advisory_xact_lock(hashtext($1))", [operationKey]);
+    const { rows: tasks } = await prepare.query(
+      "SELECT * FROM tasks WHERE task_id = $1 FOR UPDATE",
       [taskId]
     );
-
-    if (bids.length === 0) {
-      return { success: false, error: "No bids found for this task" };
+    if (tasks.length === 0) throw new Error("Task not found");
+    const task = tasks[0];
+    if (task.phase === "IN_PROGRESS" && task.worker_agent) {
+      await prepare.query("COMMIT");
+      return { success: true, winner: task.worker_agent };
     }
 
-    // Score bids: lower price + higher model_score = better
+    const existing = await prepare.query("SELECT * FROM chain_operations WHERE operation_key = $1", [operationKey]);
+    if (existing.rowCount) {
+      operation = existing.rows[0];
+      await prepare.query("COMMIT");
+    } else {
+    if (!["OPEN", "POSTED", "BIDDING"].includes(task.phase)) {
+      throw new Error(`Task cannot be awarded from phase ${task.phase}`);
+    }
+    if (task.bidding_ends && new Date(task.bidding_ends).getTime() > Date.now()) {
+      throw new Error(`Bidding remains open until ${new Date(task.bidding_ends).toISOString()}`);
+    }
+
+    const { rows: bids } = await prepare.query(
+      `SELECT b.*, a.reputation, a.benchmark_score
+       FROM bids b
+       JOIN agents a ON a.agent_id = b.agent_id AND a.status = 'ACTIVE'
+       WHERE b.task_id = $1 AND b.bid_price > 0 AND b.bid_price <= $2
+       ORDER BY b.bid_price ASC`,
+      [taskId, task.max_budget]
+    );
+    if (bids.length === 0) throw new Error("No eligible bids found for this task");
+
     let bestBid = bids[0];
-    let bestScore = 0;
-
+    let bestScore = -1;
+    const budget = Number(task.max_budget);
     for (const bid of bids) {
-      const priceScore = 100 - (Number(bid.bid_price) / 10000) * 100; // Lower = better
-      const modelScore = Number(bid.model_score || 50);
+      const priceScore = Math.max(0, ((budget - Number(bid.bid_price)) / budget) * 100);
+      const reputationScore = Math.min(100, Number(bid.reputation || 0) / 100);
+      const benchmarkScore = Math.min(100, Number(bid.benchmark_score || 0));
       const speedScore = Math.max(0, 100 - Number(bid.estimated_hours || 24));
-      const total = priceScore * 0.4 + modelScore * 0.35 + speedScore * 0.25;
-
+      const qualityScore = benchmarkScore > 0 ? benchmarkScore : reputationScore;
+      const total = priceScore * 0.35 + qualityScore * 0.35 + reputationScore * 0.2 + speedScore * 0.1;
       if (total > bestScore) {
         bestScore = total;
         bestBid = bid;
       }
     }
 
-    // Update DB: mark winner
-    await pool.query(
-      "UPDATE bids SET is_awarded = true WHERE task_id = $1 AND agent_id = $2",
-      [taskId, bestBid.agent_id]
-    );
+      const payload = { winner: bestBid.agent_id, bidPrice: String(bestBid.bid_price), score: Math.round(bestScore) };
+      const { rows } = await prepare.query(
+        `INSERT INTO chain_operations (id, operation_key, operation_type, resource_id, payload)
+         VALUES ($1, $2, 'TASK_AWARD', $3, $4) RETURNING *`,
+        [randomUUID(), operationKey, taskId, payload]
+      );
+      operation = rows[0];
+      await prepare.query("COMMIT");
+    }
+  } catch (err: any) {
+    await prepare.query("ROLLBACK").catch(() => {});
+    return { success: false, error: err.message };
+  } finally {
+    prepare.release();
+  }
 
-    // Update task phase
-    await pool.query(
-      "UPDATE tasks SET phase = 'AWARDED', worker_agent = $1, awarded_price = $2, awarded_at = NOW(), updated_at = NOW() WHERE task_id = $3",
-      [bestBid.agent_id, bestBid.bid_price, taskId]
-    );
+  const payload = operation.payload;
+  let txHash = operation.tx_hash as `0x${string}` | undefined;
+  try {
+    // Reconcile chain state before broadcasting. This closes the crash window
+    // where a previous transaction finalized before its hash reached Postgres.
+    const chainTask = await publicClient.readContract({
+      address: CONTRACTS.taskManager,
+      abi: TASK_MANAGER_ABI,
+      functionName: "getTask",
+      args: [taskId as `0x${string}`],
+    }) as unknown as any[];
+    const chainWinner = String(chainTask[2] || "");
+    if (chainWinner && chainWinner !== payload.winner) {
+      throw new Error(`Chain already assigned task to ${chainWinner}, expected ${payload.winner}`);
+    }
 
-    // Try on-chain assignment
-    try {
-      await walletClient.writeContract({
+    if (!chainWinner && txHash) {
+      await publicClient.waitForTransactionReceipt({ hash: txHash });
+      const confirmed = await publicClient.readContract({
+        address: CONTRACTS.taskManager,
+        abi: TASK_MANAGER_ABI,
+        functionName: "getTask",
+        args: [taskId as `0x${string}`],
+      }) as unknown as any[];
+      if (String(confirmed[2] || "") !== payload.winner) {
+        throw new Error("Submitted award transaction did not finalize the expected winner");
+      }
+    } else if (!chainWinner) {
+      txHash = await walletClient.writeContract({
         address: CONTRACTS.taskManager,
         abi: TASK_MANAGER_ABI,
         functionName: "assignTask",
-        args: [taskId as `0x${string}`, bestBid.agent_id],
+        args: [taskId as `0x${string}`, payload.winner],
       });
-    } catch (chainErr: any) {
-      console.warn(`[LIFECYCLE] On-chain assign failed (non-critical): ${chainErr.message?.slice(0, 80)}`);
+      await pool.query(
+        `UPDATE chain_operations SET status = 'SUBMITTED', tx_hash = $1, attempts = attempts + 1, updated_at = NOW()
+         WHERE operation_key = $2`, [txHash, operationKey]
+      );
+      await publicClient.waitForTransactionReceipt({ hash: txHash });
     }
-
-    // Create notification
-    await insertActivity({
-      type: "award",
-      agent: bestBid.agent_id,
-      taskId,
-      message: `Task awarded to ${bestBid.agent_id} at ${bestBid.bid_price} AIWK (score: ${Math.round(bestScore)})`,
-    });
-
-    // Insert notification row for the agent to poll
     await pool.query(
-      `INSERT INTO activity_log (type, agent_id, task_id, message, metadata)
-       VALUES ('notification', $1, $2, $3, $4)`,
-      [
-        bestBid.agent_id,
-        taskId,
-        `You won task ${taskId.slice(0, 16)}... — start working!`,
-        JSON.stringify({ action: "TASK_AWARDED", bidPrice: bestBid.bid_price }),
-      ]
+      `UPDATE chain_operations SET status = 'CONFIRMED', tx_hash = COALESCE($1, tx_hash), error = NULL, updated_at = NOW()
+       WHERE operation_key = $2`, [txHash || null, operationKey]
     );
 
-    return { success: true, winner: bestBid.agent_id };
+    const projection = await pool.connect();
+    let projected = false;
+    try {
+      await projection.query("BEGIN");
+      const taskUpdate = await projection.query(
+        `UPDATE tasks SET phase = 'IN_PROGRESS', worker_agent = $1, awarded_price = $2, awarded_at = COALESCE(awarded_at, NOW()), updated_at = NOW()
+         WHERE task_id = $3 AND (phase IN ('OPEN', 'POSTED', 'BIDDING') OR worker_agent = $1)
+         RETURNING task_id`,
+        [payload.winner, payload.bidPrice, taskId]
+      );
+      if (!taskUpdate.rowCount) throw new Error("Local task state conflicts with finalized chain assignment");
+      projected = true;
+      await projection.query(
+        "UPDATE bids SET is_awarded = (agent_id = $2), composite_score = CASE WHEN agent_id = $2 THEN $3 ELSE composite_score END WHERE task_id = $1",
+        [taskId, payload.winner, payload.score]
+      );
+      await projection.query(
+        "UPDATE chain_operations SET status = 'PROJECTED', updated_at = NOW() WHERE operation_key = $1",
+        [operationKey]
+      );
+      await projection.query("COMMIT");
+    } catch (error) {
+      await projection.query("ROLLBACK").catch(() => {});
+      throw error;
+    } finally {
+      projection.release();
+    }
+
+    if (projected) try {
+      await insertActivity({
+        type: "award",
+        agent: payload.winner,
+        taskId,
+        message: `Task awarded to ${payload.winner} at ${payload.bidPrice} (score: ${payload.score})`,
+      });
+      await pool.query(
+        `INSERT INTO activity_log (type, agent_id, task_id, message, metadata)
+         VALUES ('notification', $1, $2, $3, $4)`,
+        [
+          payload.winner,
+          taskId,
+          `You won task ${taskId.slice(0, 16)}...`,
+          JSON.stringify({ action: "TASK_AWARDED", bidPrice: payload.bidPrice, txHash, operationKey }),
+        ]
+      );
+    } catch (notificationError: any) {
+      console.warn(`[LIFECYCLE] Award finalized but notification failed: ${notificationError.message}`);
+    }
+
+    return { success: true, winner: payload.winner, txHash };
   } catch (err: any) {
+    await pool.query(
+      `UPDATE chain_operations SET status = CASE WHEN status IN ('SUBMITTED', 'CONFIRMED') THEN status ELSE 'FAILED' END,
+       error = $1, updated_at = NOW() WHERE operation_key = $2`,
+      [err.message, operationKey]
+    ).catch(() => {});
     return { success: false, error: err.message };
   }
 }
 
-// ═══════════════════════════════════════════════════════════════
-// 2. SUBMIT — Agent submits a chunk/step deliverable
-//    Enqueues verification via bunqueue instead of inline processing.
-// ═══════════════════════════════════════════════════════════════
 export async function submitStep(
   taskId: string,
   chunkIndex: number,
@@ -125,243 +198,50 @@ export async function submitStep(
   commitHash?: string
 ): Promise<{ success: boolean; queued?: boolean; error?: string }> {
   try {
-    // Update task phase
+    if (!commitHash || !/^[0-9a-f]{40}$/i.test(commitHash)) {
+      return { success: false, error: "A full 40-character Git commit SHA is required" };
+    }
+    const { rows } = await pool.query(
+      `SELECT t.worker_agent, t.phase, c.verified, s.repo_url, s.test_command
+       FROM tasks t
+       JOIN chunks c ON c.task_id = t.task_id AND c.chunk_index = $2
+       JOIN task_specs s ON s.task_id = t.task_id
+       WHERE t.task_id = $1 LIMIT 1`,
+      [taskId, chunkIndex]
+    );
+    if (rows.length === 0) return { success: false, error: "Task, chunk, or TaskSpec not found" };
+    if (rows[0].worker_agent !== agentId) return { success: false, error: "Agent is not assigned to this task" };
+    if (!["IN_PROGRESS", "EXECUTING", "SUBMITTED"].includes(rows[0].phase)) {
+      return { success: false, error: `Task cannot accept work in phase ${rows[0].phase}` };
+    }
+    if (rows[0].verified) return { success: false, error: "Chunk is already verified" };
+    if (!rows[0].repo_url || !rows[0].test_command) {
+      return { success: false, error: "TaskSpec is missing repository or test configuration" };
+    }
+
     await pool.query(
       "UPDATE tasks SET phase = 'SUBMITTED', updated_at = NOW() WHERE task_id = $1",
       [taskId]
     );
-
-    // Enqueue verification job (async — returns immediately)
     const { enqueueVerification } = await import("./queue");
     await enqueueVerification(taskId, chunkIndex, agentId, commitHash);
-
     await insertActivity({
       type: "push",
       agent: agentId,
       taskId,
-      message: `Submitted chunk ${chunkIndex} for ${taskId.slice(0, 16)}... — queued for verification`,
+      message: `Submitted chunk ${chunkIndex} at commit ${commitHash}`,
     });
-
     return { success: true, queued: true };
   } catch (err: any) {
     return { success: false, error: err.message };
   }
 }
 
-// ═══════════════════════════════════════════════════════════════
-// 3. VERIFY — Check submitted work and approve/reject
-// ═══════════════════════════════════════════════════════════════
-export async function verifyStep(
-  taskId: string,
-  chunkIndex: number
-): Promise<boolean> {
-  try {
-    // In production: spin up Daytona sandbox, run tests, check lint
-    // For now: auto-approve with a quality check simulation
-    const qualityScore = 70 + Math.floor(Math.random() * 30); // 70-100
-
-    // Record verification
-    await pool.query(
-      `INSERT INTO verification_jobs (task_id, chunk_index, status, test_passed, lint_passed, quality_score, completed_at, created_at)
-       VALUES ($1, $2, 'COMPLETED', true, true, $3, NOW(), NOW())
-       ON CONFLICT DO NOTHING`,
-      [taskId, chunkIndex, qualityScore]
-    );
-
-    // Mark chunk as verified
-    await pool.query(
-      `UPDATE chunks SET verified = true, verified_at = NOW(), quality_score = $1
-       WHERE task_id = $2 AND chunk_index = $3`,
-      [qualityScore, taskId, chunkIndex]
-    );
-
-    // Update task verified_chunks count
-    await pool.query(
-      `UPDATE tasks SET verified_chunks = verified_chunks + 1, updated_at = NOW() WHERE task_id = $1`,
-      [taskId]
-    );
-
-    // Check if all chunks verified → complete task
-    const { rows } = await pool.query(
-      "SELECT total_chunks, verified_chunks FROM tasks WHERE task_id = $1",
-      [taskId]
-    );
-
-    if (rows.length > 0 && rows[0].verified_chunks >= rows[0].total_chunks && rows[0].total_chunks > 0) {
-      await completeTask(taskId);
-    }
-
-    // Try on-chain verification
-    try {
-      await walletClient.writeContract({
-        address: CONTRACTS.taskManager,
-        abi: TASK_MANAGER_ABI,
-        functionName: "verifyStep",
-        args: [taskId as `0x${string}`, BigInt(chunkIndex), true, BigInt(qualityScore)],
-      });
-    } catch (chainErr: any) {
-      console.warn(`[LIFECYCLE] On-chain verify failed (non-critical): ${chainErr.message?.slice(0, 80)}`);
-    }
-
-    return true;
-  } catch (err: any) {
-    console.error(`[LIFECYCLE] Verify failed: ${err.message}`);
-    return false;
-  }
-}
-
-// ═══════════════════════════════════════════════════════════════
-// 4. COMPLETE — All chunks verified, release payment
-// ═══════════════════════════════════════════════════════════════
-export async function completeTask(taskId: string): Promise<void> {
-  try {
-    // Get task details
-    const { rows } = await pool.query(
-      "SELECT * FROM tasks WHERE task_id = $1",
-      [taskId]
-    );
-    if (rows.length === 0) return;
-
-    const task = rows[0];
-    const paid = task.awarded_price || task.max_budget;
-
-    // Update task state
-    await pool.query(
-      `UPDATE tasks SET phase = 'COMPLETED', paid_out = $1, completed_at = NOW(), updated_at = NOW()
-       WHERE task_id = $2`,
-      [paid, taskId]
-    );
-
-    // Read on-chain task to get final complexityLevel (slot 16 = complexityClaim).
-    let complexityLevel = 5;
-    try {
-      const onchain = (await publicClient.readContract({
-        address: CONTRACTS.taskManager,
-        abi: TASK_MANAGER_ABI,
-        functionName: "getTask",
-        args: [taskId as `0x${string}`],
-      })) as any[];
-      complexityLevel = Number(onchain[16]) || 5;
-    } catch (readErr: any) {
-      console.warn(`[LIFECYCLE] Could not read on-chain complexity, defaulting to 5: ${readErr.message?.slice(0, 80)}`);
-    }
-
-    // Update agent reputation
-    if (task.worker_agent) {
-      await updateReputation(task.worker_agent, true, paid, complexityLevel);
-    }
-
-    // Try on-chain completion
-    try {
-      const hashBytes = ("0x" + "00".repeat(32)) as `0x${string}`;
-      await walletClient.writeContract({
-        address: CONTRACTS.taskManager,
-        abi: TASK_MANAGER_ABI,
-        functionName: "verifyCompletion",
-        args: [taskId as `0x${string}`, true, BigInt(80)],
-      });
-    } catch (chainErr: any) {
-      console.warn(`[LIFECYCLE] On-chain completion failed (non-critical): ${chainErr.message?.slice(0, 80)}`);
-    }
-
-    await insertActivity({
-      type: "pay",
-      agent: task.worker_agent,
-      taskId,
-      message: `Task completed! ${paid} AIWK released to ${task.worker_agent}`,
-    });
-
-    // Notify agent of payment
-    await pool.query(
-      `INSERT INTO activity_log (type, agent_id, task_id, message, metadata)
-       VALUES ('notification', $1, $2, $3, $4)`,
-      [
-        task.worker_agent,
-        taskId,
-        `Payment received: ${paid} AIWK for task ${taskId.slice(0, 16)}...`,
-        JSON.stringify({ action: "PAYMENT_RELEASED", amount: paid }),
-      ]
-    );
-  } catch (err: any) {
-    console.error(`[LIFECYCLE] Complete failed: ${err.message}`);
-  }
-}
-
-// ═══════════════════════════════════════════════════════════════
-// 5. REPUTATION — Update agent stats after task outcome
-// ═══════════════════════════════════════════════════════════════
-export async function updateReputation(
-  agentId: string,
-  success: boolean,
-  amountEarned: string | number,
-  complexityLevel: number = 5
-): Promise<void> {
-  try {
-    if (success) {
-      await pool.query(
-        `UPDATE agents SET
-           tasks_completed = tasks_completed + 1,
-           current_streak = current_streak + 1,
-           best_streak = GREATEST(best_streak, current_streak + 1),
-           reputation = LEAST(10000, reputation + 200),
-           total_earned = total_earned + $1,
-           updated_at = NOW()
-         WHERE agent_id = $2`,
-        [amountEarned, agentId]
-      );
-    } else {
-      await pool.query(
-        `UPDATE agents SET
-           tasks_failed = tasks_failed + 1,
-           current_streak = 0,
-           reputation = GREATEST(0, reputation - 500),
-           updated_at = NOW()
-         WHERE agent_id = $1`,
-        [agentId]
-      );
-    }
-
-    // Try on-chain reputation update
-    try {
-      // Contract signature: (string agentId, bool taskSuccess, bool taskPartial,
-      //                       uint256 complexityLevel, uint256 qualityScore)
-      // See contracts/AgentRegistry.sol:158-164
-      await walletClient.writeContract({
-        address: CONTRACTS.agentRegistry,
-        abi: AGENT_REGISTRY_ABI,
-        functionName: "updateReputation",
-        args: [
-          agentId,
-          success,
-          false, // taskPartial — we never call this with partial today
-          BigInt(complexityLevel), // complexityLevel (slot 4)
-          BigInt(success ? 80 : 0), // qualityScore (slot 5)
-        ],
-      });
-    } catch (chainErr: any) {
-      console.warn(`[LIFECYCLE] On-chain reputation update failed: ${chainErr.message?.slice(0, 80)}`);
-    }
-
-    await insertActivity({
-      type: success ? "verify" : "fail",
-      agent: agentId,
-      message: success
-        ? `Reputation +200 for ${agentId} (earned ${amountEarned} AIWK)`
-        : `Reputation -500 for ${agentId} (task failed)`,
-    });
-  } catch (err: any) {
-    console.error(`[LIFECYCLE] Reputation update failed: ${err.message}`);
-  }
-}
-
-// ═══════════════════════════════════════════════════════════════
-// 6. NOTIFICATIONS — Poll endpoint for agents
-// ═══════════════════════════════════════════════════════════════
 export async function getAgentNotifications(
   agentId: string,
   since?: string
 ): Promise<any[]> {
-  const sinceDate = since || new Date(Date.now() - 86400000).toISOString(); // Last 24h
+  const sinceDate = since || new Date(Date.now() - 86_400_000).toISOString();
   const { rows } = await pool.query(
     `SELECT * FROM activity_log
      WHERE agent_id = $1 AND type = 'notification' AND created_at > $2

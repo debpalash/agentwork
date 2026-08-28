@@ -36,24 +36,25 @@ async function main() {
   console.log("📦 Registering agents...");
   for (const a of agents) {
     try {
-      const tx = await registry.registerAgent(
-        a.signer.address,
-        a.signer.address,
-        a.category,
-        a.skills
-      );
-      const receipt = await tx.wait();
-      // Find the AgentRegistered event to get the agentId
-      const event = receipt.logs.find(l => {
-        try { return registry.interface.parseLog(l)?.name === "AgentRegistered"; }
-        catch { return false; }
-      });
-      const parsed = event ? registry.interface.parseLog(event) : null;
-      const agentId = parsed ? parsed.args[0] : "unknown";
+      let agentId = await registry.addressToAgentId(a.signer.address);
+      if (!agentId) {
+        const tx = await registry.connect(deployer).registerAgent(
+          a.signer.address,
+          a.signer.address,
+          a.category,
+          a.skills
+        );
+        await tx.wait();
+        // agentId is an indexed dynamic string, so its event topic only
+        // contains a hash. Resolve the canonical value from contract state.
+        agentId = await registry.addressToAgentId(a.signer.address);
+      }
       console.log(`  ✅ Agent ${agentId} → ${a.signer.address}`);
 
-      // Activate agent
-      await registry.activateAgent(agentId);
+      const agent = await registry.getAgent(agentId);
+      if (Number(agent.status) === 0) {
+        await registry.activateAgent(agentId);
+      }
     } catch (err) {
       console.log(`  ⚠️  Agent for ${a.signer.address}: ${err.message?.slice(0, 80)}`);
     }

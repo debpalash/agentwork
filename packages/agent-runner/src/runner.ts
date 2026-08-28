@@ -5,7 +5,7 @@
  *   BOOT → POLL → EVALUATE → BID → MONITOR → EXECUTE → SUBMIT → repeat
  */
 
-import { AIWorkSDK, type Task } from '@aiwork/sdk';
+import { CollagentSDK, type Task } from '@aiwork/sdk';
 import { privateKeyToAccount } from 'viem/accounts';
 
 export interface AgentRunnerConfig {
@@ -31,7 +31,7 @@ const STRATEGY_MULTIPLIER: Record<string, number> = {
 };
 
 export class AgentRunner {
-  private sdk: AIWorkSDK;
+  private sdk: CollagentSDK;
   private config: AgentRunnerConfig;
   private walletAddress: string;
   private agentId: string | null = null;
@@ -47,13 +47,16 @@ export class AgentRunner {
     const account = privateKeyToAccount(pk as `0x${string}`);
     this.walletAddress = account.address;
 
-    this.sdk = new AIWorkSDK({
+    this.sdk = new CollagentSDK({
       apiBase: config.apiBase,
       apiKey: config.apiKey,
     });
   }
 
   async start() {
+    if (!this.config.dryRun && !this.config.executor) {
+      throw new Error("A real executor is required unless --dry-run is enabled");
+    }
     this.running = true;
     this.printBanner();
 
@@ -85,9 +88,13 @@ export class AgentRunner {
           this.agentId = result.agentId || null;
           console.log(`[AGENT] Registered! ID: ${this.agentId}`);
         } catch (err: any) {
-          console.warn(`[WARN] Registration failed: ${err.message}. Continuing anyway.`);
+          console.warn(`[WARN] Registration failed: ${err.message}`);
         }
       }
+    }
+
+    if (!this.config.dryRun && (!this.agentId || agent?.status !== 'ACTIVE')) {
+      throw new Error('Live mode requires an ACTIVE registered agent and an agent-scoped API key');
     }
 
     console.log(`[DAEMON] Starting autonomous loop (every ${this.config.pollIntervalMs / 1000}s)...\n`);
@@ -150,10 +157,9 @@ export class AgentRunner {
       try {
         await this.sdk.bids.submit(taskId, {
           agentAddress: this.walletAddress,
-          agentId: this.agentId || `agent-${this.walletAddress.slice(2, 10)}`,
+          agentId: this.agentId!,
           amount: bidAmount,
           estimatedHours: this.estimateHours(task),
-          modelScore: 75,
         });
         this.bidHistory.add(taskId);
         this.stats.bids++;
@@ -208,21 +214,21 @@ export class AgentRunner {
             commitHash = await this.config.executor(task);
             console.log(`  │  Executor returned: ${commitHash?.slice(0, 20) || 'done'}`);
           } else {
-            // Simulate work (placeholder for real execution)
-            await this.sleep(1000);
-            commitHash = `0x${Date.now().toString(16)}`;
-            console.log(`  │  [SIM] Work simulated (${commitHash.slice(0, 16)}...)`);
+            console.log("  │  [DRY RUN] No executor invoked");
           }
 
           // Submit chunk
           if (!this.config.dryRun) {
             try {
+              if (!commitHash || !/^[0-9a-f]{40}$/i.test(commitHash)) {
+                throw new Error('Executor must push the work, finalize TaskManager.submitStep, and return its full 40-character Git commit SHA');
+              }
               const result = await this.sdk.tasks.submit(taskId, {
                 chunkIndex: i,
                 agentId: this.agentId!,
                 commitHash,
               });
-              console.log(`  │  [SUBMIT] ${result.verified ? 'Verified ✓' : 'Pending review'}`);
+              console.log(`  │  [SUBMIT] ${result.queued ? 'Queued for exact-commit verification' : 'Accepted'}`);
             } catch (err: any) {
               console.log(`  │  [ERR] Submit failed: ${err.message}`);
             }
@@ -292,7 +298,7 @@ export class AgentRunner {
   private printBanner() {
     console.log(`
 ╔═══════════════════════════════════════════════════════════╗
-║           AIWork Agent Daemon v1.0.0                      ║
+║          Collagent Agent Daemon v1.0.0                    ║
 ╠═══════════════════════════════════════════════════════════╣
 ║  Wallet:     ${this.walletAddress.slice(0, 20)}...          ║
 ║  Skills:     ${this.config.skills.join(', ').slice(0, 32).padEnd(32)}    ║

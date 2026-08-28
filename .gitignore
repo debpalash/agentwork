@@ -15,7 +15,7 @@ build/
 # ═══ Local Postgres ═══
 .pg-local/
 
-# ═══ SQLite (bunqueue) ═══
+# ═══ Local transient databases ═══
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm

@@ -7,8 +7,11 @@ import {
   account,
 } from "../services/blockchain";
 import { authMiddleware } from "../middleware/auth";
+import type { AppEnv } from "../types";
+import { requireRole } from "../middleware/roles";
+import { upsertAgent } from "../db";
 
-export const agentRoutes = new Hono();
+export const agentRoutes = new Hono<AppEnv>();
 
 // ─── Register Agent (Protected) ────────────────────────────────
 agentRoutes.post("/register", authMiddleware, async (c) => {
@@ -17,6 +20,12 @@ agentRoutes.post("/register", authMiddleware, async (c) => {
 
   if (!walletAddress || category === undefined || !skills?.length) {
     return c.json({ error: "Missing required fields: walletAddress, category, skills" }, 400);
+  }
+  if (c.get("role") !== "admin") {
+    const authenticatedWallet = c.get("walletAddress");
+    if (!authenticatedWallet || authenticatedWallet.toLowerCase() !== walletAddress.toLowerCase()) {
+      return c.json({ error: "Registration wallet must match the authenticated wallet" }, 403);
+    }
   }
 
   try {
@@ -31,6 +40,7 @@ agentRoutes.post("/register", authMiddleware, async (c) => {
         skills,
       ],
     });
+    await publicClient.waitForTransactionReceipt({ hash });
 
     // Get the agent ID from the address mapping
     const agentId = await publicClient.readContract({
@@ -38,6 +48,15 @@ agentRoutes.post("/register", authMiddleware, async (c) => {
       abi: AGENT_REGISTRY_ABI,
       functionName: "addressToAgentId",
       args: [walletAddress],
+    });
+    const categories = ["NLP", "VISION", "CODE", "DATA", "CREATIVE", "REASONING", "MULTIMODAL", "SPECIALIZED"];
+    await upsertAgent({
+      agentId,
+      walletAddress,
+      paymentAddress: paymentAddress || walletAddress,
+      category: categories[Number(category)] || "SPECIALIZED",
+      status: "PENDING",
+      skills,
     });
 
     return c.json({
@@ -52,8 +71,8 @@ agentRoutes.post("/register", authMiddleware, async (c) => {
 });
 
 // ─── Activate Agent (Protected) ────────────────────────────────
-agentRoutes.post("/:agentId/activate", authMiddleware, async (c) => {
-  const agentId = c.req.param("agentId");
+agentRoutes.post("/:agentId/activate", authMiddleware, requireRole("admin"), async (c) => {
+  const agentId = c.req.param("agentId")!;
 
   try {
     const hash = await walletClient.writeContract({
@@ -62,6 +81,11 @@ agentRoutes.post("/:agentId/activate", authMiddleware, async (c) => {
       functionName: "activateAgent",
       args: [agentId],
     });
+    await publicClient.waitForTransactionReceipt({ hash });
+    await (await import("../db")).pool.query(
+      "UPDATE agents SET status = 'ACTIVE', updated_at = NOW() WHERE agent_id = $1",
+      [agentId]
+    );
 
     return c.json({ success: true, txHash: hash, status: "ACTIVE" });
   } catch (err: any) {
@@ -79,7 +103,7 @@ agentRoutes.get("/:agentId", async (c) => {
       abi: AGENT_REGISTRY_ABI,
       functionName: "getAgent",
       args: [agentId],
-    }) as any[];
+    }) as unknown as any[];
 
     const categories = ["NLP", "VISION", "CODE", "DATA", "CREATIVE", "REASONING", "MULTIMODAL", "SPECIALIZED"];
     const statuses = ["PENDING", "ACTIVE", "SUSPENDED", "BANNED", "RETIRED"];
@@ -128,7 +152,7 @@ agentRoutes.get("/wallet/:address", async (c) => {
       abi: AGENT_REGISTRY_ABI,
       functionName: "getAgent",
       args: [agentId],
-    }) as any[];
+    }) as unknown as any[];
 
     const categories = ["NLP", "VISION", "CODE", "DATA", "CREATIVE", "REASONING", "MULTIMODAL", "SPECIALIZED"];
     const statuses = ["PENDING", "ACTIVE", "SUSPENDED", "BANNED", "RETIRED"];
@@ -198,7 +222,7 @@ agentRoutes.get("/", async (c) => {
             abi: AGENT_REGISTRY_ABI,
             functionName: "getAgent",
             args: [agentId],
-          }) as any[];
+          }) as unknown as any[];
 
           return {
             agentId: raw[0],
@@ -226,10 +250,10 @@ agentRoutes.get("/", async (c) => {
     let dbOnlyAgents: any[] = [];
     try {
       const dbResult = await pool.query(`
-        SELECT agent_id, wallet_address, category, status, reputation_score,
-               tasks_completed, tasks_failed, total_earned, created_at
+        SELECT agent_id, wallet_address, category, status, reputation,
+               tasks_completed, tasks_failed, total_earned, registered_at
         FROM agents
-        ORDER BY created_at DESC
+        ORDER BY registered_at DESC
       `);
 
       dbOnlyAgents = dbResult.rows
@@ -239,8 +263,8 @@ agentRoutes.get("/", async (c) => {
           walletAddress: row.wallet_address,
           category: row.category || "CODE",
           status: row.status || "ACTIVE",
-          reputationScore: Number(row.reputation_score || 0),
-          reputationPercent: ((Number(row.reputation_score || 0)) / 100).toFixed(1) + "%",
+          reputationScore: Number(row.reputation || 0),
+          reputationPercent: ((Number(row.reputation || 0)) / 100).toFixed(1) + "%",
           totalEarned: String(row.total_earned || 0),
           isVerified: false,
           tasksCompleted: Number(row.tasks_completed || 0),
@@ -279,17 +303,34 @@ agentRoutes.post("/keys", authMiddleware, async (c) => {
     return c.json({ error: "walletAddress and label required" }, 400);
   }
 
+  const isAdmin = c.get("role") === "admin";
+  const authenticatedWallet = c.get("walletAddress");
+  if (!isAdmin && (!authenticatedWallet || authenticatedWallet.toLowerCase() !== walletAddress.toLowerCase())) {
+    return c.json({ error: "API keys may only be created for the authenticated wallet" }, 403);
+  }
+
   // Only admin scope can create admin keys
   const requestedScope = scope || "agent";
-  if (requestedScope === "admin" && c.get("scope") !== "admin") {
+  if (requestedScope === "admin" && !isAdmin) {
     return c.json({ error: "Only admins can create admin-scoped keys" }, 403);
   }
 
   try {
+    let boundAgentId = agentId;
+    if (!isAdmin) {
+      const { pool } = await import("../db");
+      const { rows } = await pool.query(
+        "SELECT agent_id FROM agents WHERE LOWER(wallet_address) = LOWER($1) LIMIT 1",
+        [walletAddress]
+      );
+      if (rows.length === 0) return c.json({ error: "Register this wallet before creating an agent key" }, 409);
+      boundAgentId = rows[0].agent_id;
+      if (agentId && agentId !== boundAgentId) return c.json({ error: "agentId does not belong to this wallet" }, 403);
+    }
     const { createApiKey } = await import("../services/apikeys");
     const result = await createApiKey({
       walletAddress,
-      agentId,
+      agentId: boundAgentId,
       label,
       scope: requestedScope,
       expiresInDays,
@@ -309,7 +350,11 @@ agentRoutes.post("/keys", authMiddleware, async (c) => {
 
 /** List all API keys for a wallet (metadata only, no plaintext). */
 agentRoutes.get("/keys/:walletAddress", authMiddleware, async (c) => {
-  const walletAddress = c.req.param("walletAddress");
+  const walletAddress = c.req.param("walletAddress")!;
+
+  if (c.get("role") !== "admin" && c.get("walletAddress")?.toLowerCase() !== walletAddress.toLowerCase()) {
+    return c.json({ error: "Cannot list another wallet's API keys" }, 403);
+  }
 
   try {
     const { listApiKeys } = await import("../services/apikeys");

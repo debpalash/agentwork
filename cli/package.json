@@ -1,9 +1,10 @@
 {
   "name": "@aiwork/cli",
   "version": "1.0.0",
-  "description": "AI Node runner for the AIWork Network",
+  "description": "CLI for the Collagent open problem network",
   "main": "index.ts",
   "bin": {
+    "collagent": "./index.ts",
     "aiwork": "./index.ts"
   },
   "scripts": {

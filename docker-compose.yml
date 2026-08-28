@@ -1,4 +1,6 @@
-# AIWork v2 — Full Self-Hosted Stack
+# AIWork v2 — local self-hosted reference stack
+# Local-only defaults below are intentionally easy to boot. Production MUST use
+# docker-compose.production.yml, external secrets, and digest-pinned images.
 # Usage: docker compose up -d
 
 services:
@@ -6,15 +8,15 @@ services:
   # DATABASE — Persistent storage for tasks, agents, bids
   # ═══════════════════════════════════════════════════════════
   postgres:
-    image: postgres:latest
+    image: postgres:18-alpine
     container_name: aiwork-postgres
     restart: unless-stopped
     environment:
       POSTGRES_DB: aiwork
       POSTGRES_USER: aiwork
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-aiwork_secret_change_me}
-    ports:
-      - "5432:5432"
+    expose:
+      - "5432"
     volumes:
       - pgdata:/var/lib/postgresql
       - ./docker/init.sql:/docker-entrypoint-initdb.d/init.sql
@@ -26,8 +28,8 @@ services:
 
 
   # ═══════════════════════════════════════════════════════════
-  # NOTE: Redis removed — bunqueue (embedded SQLite) handles
-  # job queues, pub/sub, and scheduling. Zero external deps.
+  # NOTE: AIWork queues use PostgreSQL durability. This Redis instance belongs
+  # only to the self-hosted Daytona sandbox cluster.
   # ═══════════════════════════════════════════════════════════
 
 
@@ -43,7 +45,7 @@ services:
       - USER_GID=1000
       # Server
       - FORGEJO__server__DOMAIN=${FORGEJO_DOMAIN:-localhost}
-      - FORGEJO__server__ROOT_URL=http://${FORGEJO_DOMAIN:-localhost}/
+      - FORGEJO__server__ROOT_URL=${FORGEJO_ROOT_URL:-http://git.localhost}/
       - FORGEJO__server__HTTP_PORT=3000
       # Database — use postgres
       - FORGEJO__database__DB_TYPE=postgres
@@ -55,9 +57,10 @@ services:
       - FORGEJO__service__DISABLE_REGISTRATION=true
       - FORGEJO__service__REQUIRE_SIGNIN_VIEW=false
       # Webhook
-      - FORGEJO__webhook__ALLOWED_HOST_LIST=*
+      - FORGEJO__webhook__ALLOWED_HOST_LIST=api
+    expose:
+      - "3000"
     ports:
-      - "3000:3000"
       - "2222:22"
     volumes:
       - forgejodata:/data
@@ -126,13 +129,13 @@ services:
       - DEFAULT_RUNNER_NAME=default
       - DEFAULT_REGION_ID=us
       - DEFAULT_REGION_NAME=us
-      - RESOURCE_LIMITS_DISABLED=true
+      - RESOURCE_LIMITS_DISABLED=false
       - SKIP_USER_EMAIL_VERIFICATION=true
       - RUN_MIGRATIONS=true
       - MAINTENANCE_MODE=false
       - OTEL_ENABLED=false
-    ports:
-      - "3100:3100"
+    expose:
+      - "3100"
     depends_on:
       - daytona-db
       - daytona-runner
@@ -149,7 +152,7 @@ services:
       - ENVIRONMENT=development
       - API_PORT=3003
       - DAYTONA_RUNNER_TOKEN=aiwork_daytona_runner_key
-      - RESOURCE_LIMITS_DISABLED=true
+      - RESOURCE_LIMITS_DISABLED=false
       - AWS_ENDPOINT_URL=http://daytona-minio:9000
       - AWS_REGION=us-east-1
       - AWS_ACCESS_KEY_ID=minioadmin
@@ -159,8 +162,8 @@ services:
       - RUNNER_DOMAIN=daytona-runner
       - SSH_GATEWAY_ENABLE=false
       - INTER_SANDBOX_NETWORK_ENABLED=false
-    ports:
-      - "3003:3003"
+    expose:
+      - "3003"
 
   daytona-db:
     image: postgres:18
@@ -174,7 +177,7 @@ services:
       - daytonadb:/var/lib/postgresql/18/docker
 
   daytona-redis:
-    image: redis:latest
+    image: redis:8.2-alpine
     container_name: aiwork-daytona-redis
     restart: unless-stopped
 
@@ -186,8 +189,8 @@ services:
       - ./docker/daytona/dex-config.yaml:/etc/dex/config.yaml
       - daytonadex:/var/dex
     entrypoint: ['sh', '-c', 'touch /var/dex/dex.db && exec dex serve /etc/dex/config.yaml']
-    ports:
-      - "5556:5556"
+    expose:
+      - "5556"
 
   daytona-registry:
     image: registry:2.8.2
@@ -198,11 +201,11 @@ services:
       REGISTRY_HTTP_ADDR: '0.0.0.0:6000'
     volumes:
       - daytonaregistry:/var/lib/registry
-    ports:
-      - "6000:6000"
+    expose:
+      - "6000"
 
   daytona-minio:
-    image: minio/minio:latest
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
     container_name: aiwork-daytona-minio
     restart: unless-stopped
     environment:
@@ -211,8 +214,8 @@ services:
     volumes:
       - daytonaminio:/data
     command: server /data --console-address ":9001"
-    ports:
-      - "9001:9001"
+    expose:
+      - "9001"
 
   # ═══════════════════════════════════════════════════════════
   # API — AIWork backend (Bun + Hono)
@@ -221,7 +224,6 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.api
-    container_name: aiwork-api
     restart: unless-stopped
     environment:
       - PORT=3001
@@ -231,6 +233,7 @@ services:
       # Forgejo
       - FORGEJO_URL=http://forgejo:3000
       - FORGEJO_ADMIN_TOKEN=${FORGEJO_ADMIN_TOKEN}
+      - FORGEJO_READ_TOKEN=${FORGEJO_READ_TOKEN}
       - FORGEJO_ORG=aiwork
       - FORGEJO_WEBHOOK_URL=http://api:3001/api/v1/webhooks/push
       - FORGEJO_WEBHOOK_SECRET=${WEBHOOK_SECRET:-aiwork-webhook-secret}
@@ -242,19 +245,36 @@ services:
       - DAYTONA_API_KEY=${DAYTONA_API_KEY:-}
       # Blockchain
       - RPC_URL=${RPC_URL:-http://host.docker.internal:8545}
-      - PLATFORM_PRIVATE_KEY=${PLATFORM_PRIVATE_KEY:-0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80}
+      - CHAIN_ID=${CHAIN_ID:-31337}
+      - PLATFORM_PRIVATE_KEY=${PLATFORM_PRIVATE_KEY}
       - TOKEN_ADDRESS=${TOKEN_ADDRESS}
+      - PAYMENT_TOKEN_DECIMALS=${PAYMENT_TOKEN_DECIMALS:-18}
       - AGENT_REGISTRY_ADDRESS=${AGENT_REGISTRY_ADDRESS}
       - ESCROW_VAULT_ADDRESS=${ESCROW_VAULT_ADDRESS}
+      - COMPLEXITY_ORACLE_ADDRESS=${COMPLEXITY_ORACLE_ADDRESS}
       - TASK_MANAGER_ADDRESS=${TASK_MANAGER_ADDRESS}
       - BIDDING_ENGINE_ADDRESS=${BIDDING_ENGINE_ADDRESS}
+      - DISPUTE_RESOLUTION_ADDRESS=${DISPUTE_RESOLUTION_ADDRESS}
+      - VERIFIER_QUORUM=${VERIFIER_QUORUM:-3}
+      - VERIFIER_INSTANCE_IDS=${VERIFIER_INSTANCE_IDS}
+      - ARBITER_ADDRESSES=${ARBITER_ADDRESSES}
+      - WORKER_QUEUES=
+      - API_KEYS=${API_KEYS}
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS}
+      - AUTH_ALLOWED_ORIGINS=${AUTH_ALLOWED_ORIGINS}
+      - TRUST_PROXY=true
       # OpenTelemetry → SigNoz
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://aiwork-otel-collector:4318
       - OTEL_SERVICE_NAME=aiwork-api
       - OTEL_SERVICE_VERSION=2.0.0
       - OTEL_RESOURCE_ATTRIBUTES=deployment.environment=production,platform=AIWork
-    ports:
-      - "3001:3001"
+    expose:
+      - "3001"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3001/api/v1/platform/ready"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
     depends_on:
       postgres:
         condition: service_healthy
@@ -268,6 +288,14 @@ services:
   # ═══════════════════════════════════════════════════════════
   frontend:
     build:
+      args:
+        - VITE_CHAIN_ID=${CHAIN_ID:-31337}
+        - VITE_TASK_MANAGER_ADDRESS=${TASK_MANAGER_ADDRESS}
+        - VITE_DISPUTE_RESOLUTION_ADDRESS=${DISPUTE_RESOLUTION_ADDRESS}
+        - VITE_ESCROW_VAULT_ADDRESS=${ESCROW_VAULT_ADDRESS}
+        - VITE_BOND_TOKEN_ADDRESS=${TOKEN_ADDRESS}
+        - VITE_PAYMENT_TOKEN_ADDRESS=${TOKEN_ADDRESS}
+        - VITE_PAYMENT_TOKEN_DECIMALS=${PAYMENT_TOKEN_DECIMALS:-18}
       context: .
       dockerfile: docker/Dockerfile.frontend
     container_name: aiwork-frontend
@@ -284,6 +312,10 @@ services:
     image: caddy:2-alpine
     container_name: aiwork-caddy
     restart: unless-stopped
+    environment:
+      - SITE_ADDRESS=${SITE_ADDRESS:-http://localhost}
+      - API_ADDRESS=${API_ADDRESS:-http://api.localhost}
+      - GIT_ADDRESS=${GIT_ADDRESS:-http://git.localhost}
     ports:
       - "80:80"
       - "443:443"
@@ -399,8 +431,8 @@ services:
     image: signoz/signoz:v0.118.0
     container_name: aiwork-signoz
     restart: unless-stopped
-    ports:
-      - "8085:8080"
+    expose:
+      - "8080"
     volumes:
       - signozdata:/var/lib/signoz/
     environment:
@@ -437,9 +469,9 @@ services:
       - SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_CLUSTER=cluster
       - SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_REPLICATION=true
       - SIGNOZ_OTEL_COLLECTOR_TIMEOUT=10m
-    ports:
-      - "4317:4317"   # OTLP gRPC
-      - "4318:4318"   # OTLP HTTP
+    expose:
+      - "4317"
+      - "4318"
     depends_on:
       signoz-clickhouse:
         condition: service_healthy
@@ -456,5 +488,3 @@ volumes:
   clickhousedata:
   zookeeperdata:
   signozdata:
-
-

@@ -28,6 +28,7 @@ describe("AIWork v2 — BiddingEngine + TaskManagerV2", function () {
     const EscrowVault = await ethers.getContractFactory("EscrowVault");
     escrowVault = await EscrowVault.deploy(treasury.address, validatorPool.address);
     await escrowVault.waitForDeployment();
+    await escrowVault.setPaymentToken(await mockUSDC.getAddress(), true);
 
     const ComplexityOracle = await ethers.getContractFactory("ComplexityOracle");
     complexityOracle = await ComplexityOracle.deploy();
@@ -196,6 +197,11 @@ describe("AIWork v2 — BiddingEngine + TaskManagerV2", function () {
       const awarded = await biddingEngine.getAwardedAgent(taskId);
       expect(awarded.length).to.be.gt(0);
 
+      const losingWorker = awarded === id1 ? worker2 : worker1;
+      expect(await biddingEngine.withdrawableStake(losingWorker.address)).to.equal(stake);
+      await biddingEngine.connect(losingWorker).withdrawStake();
+      expect(await biddingEngine.withdrawableStake(losingWorker.address)).to.equal(0n);
+
       // Bidding should be closed
       expect(await biddingEngine.isBiddingOpen(taskId)).to.be.false;
     });
@@ -265,6 +271,60 @@ describe("AIWork v2 — BiddingEngine + TaskManagerV2", function () {
 
       const task = await taskManagerV2.getTask(taskId);
       expect(task.totalChunks).to.equal(3);
+    });
+
+    it("should cancel through TaskManagerV2 and refund escrow", async function () {
+      const reward = ethers.parseEther("1000");
+      await mockUSDC.connect(employer).approve(await escrowVault.getAddress(), reward);
+
+      const tx = await taskManagerV2.connect(employer).postTask(
+        "Cancelled task", "CODE", "emp-01", 0,
+        await mockUSDC.getAddress(), reward, 0, 24,
+        ethers.keccak256(ethers.toUtf8Bytes("cancel")), 1
+      );
+      const receipt = await tx.wait();
+      const event = receipt.logs.find((l) => {
+        try { return taskManagerV2.interface.parseLog(l)?.name === "TaskPosted"; }
+        catch { return false; }
+      });
+      const taskId = taskManagerV2.interface.parseLog(event).args.taskId;
+
+      const before = await mockUSDC.balanceOf(employer.address);
+      await taskManagerV2.connect(employer).cancelTask(taskId);
+      const after = await mockUSDC.balanceOf(employer.address);
+      const escrow = await escrowVault.getEscrow(taskId);
+      expect(after - before).to.equal(reward - (reward * 100n) / 10000n);
+      expect(escrow.isActive).to.be.false;
+    });
+
+    it("should bind the winning bid price and bidder identity", async function () {
+      const reward = ethers.parseEther("2000");
+      const bidPrice = ethers.parseEther("1200");
+      const workerId = await getAgentId(worker1);
+      await mockUSDC.connect(employer).approve(await escrowVault.getAddress(), reward);
+
+      const tx = await taskManagerV2.connect(employer).postTask(
+        "Awarded task", "CODE", "emp-01", 0,
+        await mockUSDC.getAddress(), reward, 0, 24,
+        ethers.keccak256(ethers.toUtf8Bytes("award")), 1
+      );
+      const receipt = await tx.wait();
+      const event = receipt.logs.find((l) => {
+        try { return taskManagerV2.interface.parseLog(l)?.name === "TaskPosted"; }
+        catch { return false; }
+      });
+      const taskId = taskManagerV2.interface.parseLog(event).args.taskId;
+
+      await biddingEngine.connect(worker1).submitBid(taskId, workerId, bidPrice, 12, 90);
+      await ethers.provider.send("evm_increaseTime", [3601]);
+      await ethers.provider.send("evm_mine", []);
+      await biddingEngine.awardTask(taskId, [7000], [5], reward, 24);
+      await taskManagerV2.awardToWinner(taskId, "aiwork/task-awarded");
+
+      const task = await taskManagerV2.getTask(taskId);
+      expect(task.workerAgentId).to.equal(workerId);
+      expect(task.awardedPrice).to.equal(bidPrice);
+      expect(task.phase).to.equal(3n); // IN_PROGRESS
     });
   });
 });

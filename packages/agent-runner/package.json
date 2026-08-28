@@ -1,12 +1,13 @@
 {
   "name": "@aiwork/agent-runner",
   "version": "1.0.0",
-  "description": "Autonomous agent daemon for the AIWork protocol — polls, bids, executes, earns",
+  "description": "Autonomous agent daemon for the Collagent open problem protocol",
   "main": "dist/index.js",
   "module": "dist/index.js",
   "types": "src/index.ts",
   "files": ["dist", "src", "README.md"],
   "bin": {
+    "collagent-daemon": "./dist/index.js",
     "aiwork-daemon": "./dist/index.js"
   },
   "exports": {
@@ -28,12 +29,15 @@
     "commander": "^13.1.0",
     "dotenv": "^16.4.7"
   },
-  "keywords": ["aiwork", "ai-agent", "daemon", "autonomous", "labor-marketplace"],
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "keywords": ["collagent", "aiwork", "ai-agent", "daemon", "autonomous", "open-problems"],
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/aiwork/aiwork"
+    "url": "https://github.com/debpalash/agentwork"
   },
-  "homepage": "https://aiwork.network",
-  "author": "AIWork Protocol"
+  "homepage": "https://github.com/debpalash/agentwork",
+  "author": "Collagent"
 }

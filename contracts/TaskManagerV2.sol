@@ -246,10 +246,13 @@ contract TaskManagerV2 is AccessControl {
         Task storage task = tasks[taskId];
         if (task.phase != TaskPhase.BIDDING) revert WrongPhase();
 
-        string memory winner = biddingEngine.getAwardedAgent(taskId);
+        BiddingEngine.Bid memory winningBid = biddingEngine.getAwardedBid(taskId);
+        string memory winner = winningBid.agentId;
         require(bytes(winner).length > 0, "No winner awarded in bidding engine");
+        require(agentRegistry.getWallet(winner) == winningBid.bidder, "Bidder does not own agent ID");
 
         task.workerAgentId = winner;
+        task.awardedPrice = winningBid.bidPrice;
         task.repoSlug = repoSlug;
         task.phase = TaskPhase.IN_PROGRESS;
         task.awardedAt = block.timestamp;
@@ -329,7 +332,13 @@ contract TaskManagerV2 is AccessControl {
 
         // Get worker payment address and release escrow
         address payAddr = agentRegistry.getPaymentAddress(task.workerAgentId);
-        escrowVault.releaseFullPayment(taskId, task.workerAgentId, payAddr, avgQuality);
+        escrowVault.releaseAwardedPayment(
+            taskId,
+            task.workerAgentId,
+            payAddr,
+            task.awardedPrice + task.bonusPool,
+            avgQuality
+        );
 
         // Refund winner's bid stake
         biddingEngine.refundWinnerStake(taskId);
@@ -337,41 +346,25 @@ contract TaskManagerV2 is AccessControl {
         // Update agent reputation (success)
         agentRegistry.updateReputation(task.workerAgentId, true, false, 8, avgQuality);
 
-        uint256 totalPaid = task.awardedPrice > 0 ? task.awardedPrice : task.maxBudget;
+        uint256 totalPaid = escrowVault.getEscrow(taskId).released;
         task.paidOut = totalPaid;
 
         emit EmployerApproved(taskId, totalPaid);
     }
 
     // ═══════════════════════════════════════════════════════════
-    // 7. EMPLOYER REJECT — Pay for verified chunks only
+    // 7. EMPLOYER REJECT — Freeze escrow for arbitration
     // ═══════════════════════════════════════════════════════════
     function employerReject(bytes32 taskId, string calldata reason) external {
         Task storage task = tasks[taskId];
         if (task.phase != TaskPhase.REVIEW) revert WrongPhase();
         if (msg.sender != task.employer) revert NotEmployer();
 
-        task.phase = TaskPhase.REJECTED;
+        // All chunks have already passed system verification when a task is in
+        // REVIEW. A unilateral rejection must therefore freeze settlement for
+        // arbitration; it must not silently strand funds or punish the worker.
+        task.phase = TaskPhase.DISPUTED;
         task.failedAttempts++;
-
-        // Pay for verified chunks proportionally
-        uint256 verifiedBPS = 0;
-        Chunk[] storage chunks = taskChunks[taskId];
-        for (uint256 i = 0; i < chunks.length; i++) {
-            if (chunks[i].verified) {
-                verifiedBPS += chunks[i].percentageBPS;
-            }
-        }
-
-        // Partial payment for verified work
-        if (verifiedBPS > 0) {
-            uint256 partialPayment = (task.maxBudget * verifiedBPS) / 10000;
-            // partial release handled by escrow
-            task.paidOut = partialPayment;
-        }
-
-        // Partial reputation penalty (not as severe as full failure)
-        agentRegistry.updateReputation(task.workerAgentId, false, true, 5, 40);
 
         emit EmployerRejected(taskId, reason);
     }

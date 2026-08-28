@@ -35,6 +35,8 @@ contract BiddingEngine is AccessControl, ReentrancyGuard {
     mapping(bytes32 => bool) public biddingClosed;        // taskId => closed
     mapping(bytes32 => string) public awardedAgent;       // taskId => winning agentId
     mapping(bytes32 => mapping(string => bool)) public hasBid; // taskId => agentId => bool
+    mapping(address => uint256) public withdrawableStake;
+    address public treasury;
 
     uint256 public defaultBiddingDuration = 4 hours;
     uint256 public minBidStake = 0.001 ether;             // Minimum stake to prevent spam
@@ -53,6 +55,8 @@ contract BiddingEngine is AccessControl, ReentrancyGuard {
     event BidRefunded(bytes32 indexed taskId, string agentId, uint256 amount);
     event BidForfeited(bytes32 indexed taskId, string agentId, uint256 slashedAmount);
     event BiddingOpened(bytes32 indexed taskId, uint256 deadline);
+    event StakeWithdrawalCredited(address indexed account, uint256 amount);
+    event StakeWithdrawn(address indexed account, uint256 amount);
 
     // ─── Errors ─────────────────────────────────────────────────
     error BiddingNotOpen();
@@ -62,8 +66,12 @@ contract BiddingEngine is AccessControl, ReentrancyGuard {
     error NoBids();
     error AlreadyAwarded();
     error NotAwarded();
+    error InvalidScoreInputs();
+    error NothingToWithdraw();
+    error WithdrawalFailed();
 
     constructor() {
+        treasury = msg.sender;
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
         _grantRole(PLATFORM_ROLE, msg.sender);
     }
@@ -129,6 +137,9 @@ contract BiddingEngine is AccessControl, ReentrancyGuard {
         Bid[] storage bids = taskBids[taskId];
         if (bids.length == 0) revert NoBids();
         if (bytes(awardedAgent[taskId]).length > 0) revert AlreadyAwarded();
+        if (block.timestamp <= biddingDeadline[taskId]) revert BiddingStillOpen();
+        if (reputationScores.length != bids.length || categoryExperience.length != bids.length)
+            revert InvalidScoreInputs();
 
         uint256 bestScore = 0;
         uint256 bestIndex = 0;
@@ -154,11 +165,13 @@ contract BiddingEngine is AccessControl, ReentrancyGuard {
         awardedAgent[taskId] = bids[bestIndex].agentId;
         biddingClosed[taskId] = true;
 
-        // Refund non-winners
+        // Credit non-winners. Recipients withdraw themselves so a contract
+        // wallet with a reverting receive hook cannot block the whole award.
         for (uint256 i = 0; i < bids.length; i++) {
             if (i != bestIndex && !bids[i].isRefunded) {
                 bids[i].isRefunded = true;
-                payable(bids[i].bidder).transfer(bids[i].stakedAmount);
+                withdrawableStake[bids[i].bidder] += bids[i].stakedAmount;
+                emit StakeWithdrawalCredited(bids[i].bidder, bids[i].stakedAmount);
                 emit BidRefunded(taskId, bids[i].agentId, bids[i].stakedAmount);
             }
         }
@@ -173,9 +186,10 @@ contract BiddingEngine is AccessControl, ReentrancyGuard {
     function forfeitBid(bytes32 taskId, string calldata agentId) external onlyRole(PLATFORM_ROLE) nonReentrant {
         Bid[] storage bids = taskBids[taskId];
         for (uint256 i = 0; i < bids.length; i++) {
-            if (keccak256(bytes(bids[i].agentId)) == keccak256(bytes(agentId)) && bids[i].isAwarded) {
+            if (keccak256(bytes(bids[i].agentId)) == keccak256(bytes(agentId)) && bids[i].isAwarded && !bids[i].isForfeited && !bids[i].isRefunded) {
                 bids[i].isForfeited = true;
-                // Stake goes to platform treasury
+                withdrawableStake[treasury] += bids[i].stakedAmount;
+                emit StakeWithdrawalCredited(treasury, bids[i].stakedAmount);
                 emit BidForfeited(taskId, agentId, bids[i].stakedAmount);
                 return;
             }
@@ -189,11 +203,26 @@ contract BiddingEngine is AccessControl, ReentrancyGuard {
         for (uint256 i = 0; i < bids.length; i++) {
             if (bids[i].isAwarded && !bids[i].isRefunded && !bids[i].isForfeited) {
                 bids[i].isRefunded = true;
-                payable(bids[i].bidder).transfer(bids[i].stakedAmount);
+                withdrawableStake[bids[i].bidder] += bids[i].stakedAmount;
+                emit StakeWithdrawalCredited(bids[i].bidder, bids[i].stakedAmount);
                 emit BidRefunded(taskId, bids[i].agentId, bids[i].stakedAmount);
                 return;
             }
         }
+    }
+
+    function withdrawStake() external nonReentrant {
+        uint256 amount = withdrawableStake[msg.sender];
+        if (amount == 0) revert NothingToWithdraw();
+        withdrawableStake[msg.sender] = 0;
+        (bool success, ) = payable(msg.sender).call{value: amount}("");
+        if (!success) revert WithdrawalFailed();
+        emit StakeWithdrawn(msg.sender, amount);
+    }
+
+    function setTreasury(address newTreasury) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(newTreasury != address(0), "Invalid treasury");
+        treasury = newTreasury;
     }
 
     // ─── View Functions ─────────────────────────────────────────
@@ -215,6 +244,14 @@ contract BiddingEngine is AccessControl, ReentrancyGuard {
 
     function getAwardedAgent(bytes32 taskId) external view returns (string memory) {
         return awardedAgent[taskId];
+    }
+
+    function getAwardedBid(bytes32 taskId) external view returns (Bid memory) {
+        Bid[] storage bids = taskBids[taskId];
+        for (uint256 i = 0; i < bids.length; i++) {
+            if (bids[i].isAwarded) return bids[i];
+        }
+        revert NotAwarded();
     }
 
     // ─── Internal Scoring ───────────────────────────────────────

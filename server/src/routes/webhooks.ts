@@ -3,14 +3,12 @@
  */
 
 import { Hono } from "hono";
+import { streamSSE } from "hono/streaming";
 import { createHmac, timingSafeEqual } from "crypto";
-import { verifySandbox } from "../services/sandbox";
+import { pool, insertActivity } from "../db";
+import { enqueueVerification } from "../services/queue";
 
 export const webhookRoutes = new Hono();
-
-// In-memory stores (will migrate to Postgres+Redis)
-const activityFeed: any[] = [];
-const taskSpecs: Map<string, any> = new Map(); // taskId → spec
 
 // ─── Forgejo Push Webhook ──────────────────────────────────────
 webhookRoutes.post("/push", async (c) => {
@@ -41,7 +39,6 @@ webhookRoutes.post("/push", async (c) => {
   const body = JSON.parse(raw);
 
   const repoName = body.repository?.name;
-  const cloneUrl = body.repository?.clone_url;
   const commits = body.commits || [];
   const pusher = body.pusher?.login;
   const branch = body.ref?.replace("refs/heads/", "");
@@ -49,9 +46,23 @@ webhookRoutes.post("/push", async (c) => {
   console.log(`[WEBHOOK] Push to ${repoName} by ${pusher} on branch ${branch}`);
   console.log(`[WEBHOOK] ${commits.length} commit(s)`);
 
-  // Extract taskId from repo name (task-{first12chars})
-  const taskIdMatch = repoName?.match(/^task-(.+)$/);
-  const taskIdShort = taskIdMatch?.[1];
+  if (!repoName || !/^task-[0-9a-f]{12}$/i.test(repoName)) {
+    return c.json({ error: "unrecognized task repository" }, 400);
+  }
+
+  // Resolve the short Forgejo repository name back to the canonical task ID.
+  // Never verify against an ID or repository URL supplied by the webhook body.
+  const { rows: taskRows } = await pool.query(
+    `SELECT task_id, worker_agent FROM tasks
+     WHERE repo_slug = $1 OR repo_slug = $2
+     LIMIT 1`,
+    [repoName, `aiwork/${repoName}`]
+  );
+  if (taskRows.length === 0) {
+    return c.json({ error: "repository is not bound to a platform task" }, 404);
+  }
+  const task = taskRows[0];
+  if (!task.worker_agent) return c.json({ error: "task has not been awarded" }, 409);
 
   // Determine which chunks were updated based on changed files
   const chunksUpdated = new Map<number, string>(); // chunkIndex → commit SHA
@@ -73,103 +84,76 @@ webhookRoutes.post("/push", async (c) => {
     console.log(`[WEBHOOK] Chunks updated: ${[...chunksUpdated.keys()].map(i => i + 1).join(", ")}`);
 
     // Log activity
-    addActivity("push", pusher, repoName, `Pushed to ${chunksUpdated.size} chunk(s)`, {
-      branch, commits: commits.length, chunks: [...chunksUpdated.keys()],
+    await insertActivity({
+      type: "push",
+      agent: pusher || "unknown",
+      taskId: task.task_id,
+      message: `Pushed ${chunksUpdated.size} chunk(s) on ${branch || "unknown branch"} (${commits.length} commits)`,
     });
 
-    // Trigger sandbox verification for each chunk
-    if (cloneUrl && taskIdShort) {
-      const spec = taskSpecs.get(taskIdShort) || {
-        testCommand: "npm test 2>/dev/null || bun test 2>/dev/null || echo 'No tests'",
-        lintCommand: "npx eslint . 2>/dev/null || echo 'No lint'",
-        runtime: "node",
-      };
-
-      // Run verifications in parallel (non-blocking)
-      const chunks = [...chunksUpdated.entries()].map(([index, sha]) => ({
-        index,
-        commitHash: sha,
-      }));
-
-      // Fire-and-forget — results come back async via bunqueue
-      Promise.all(chunks.map(({ index, commitHash }) =>
-        verifySandbox(taskIdShort || repoName, index)
-      )).then((results) => {
-        results.forEach((result, i) => {
-          addActivity(
-            result.testPassed ? "verify" : "fail",
-            "system",
-            repoName,
-            `Chunk ${chunks[i].index + 1} ${result.testPassed ? "verified" : "failed"} ` +
-            `(quality: ${result.qualityScore}/100, ${result.executionTimeMs}ms, mode: ${result.mode})`,
-            { ...result }
-          );
-        });
-      }).catch((err) => {
-        console.error(`[WEBHOOK] Verification pipeline error:`, err.message);
-      });
-    }
+    const chunks = [...chunksUpdated.entries()].map(([index, sha]) => ({ index, commitHash: sha }));
+    await Promise.all(
+      chunks.map(({ index, commitHash }) =>
+        enqueueVerification(task.task_id, index, task.worker_agent, commitHash)
+      )
+    );
   }
 
   return c.json({ received: true, chunksDetected: [...chunksUpdated.keys()] });
 });
 
-// ─── Register Task Spec (for verification config) ──────────────
-webhookRoutes.post("/specs/:taskId", async (c) => {
-  const taskId = c.req.param("taskId");
-  const spec = await c.req.json();
-  taskSpecs.set(taskId, spec);
-  return c.json({ stored: true, taskId });
-});
-
 // ─── Live Activity Feed ────────────────────────────────────────
 webhookRoutes.get("/activity", async (c) => {
-  const limit = parseInt(c.req.query("limit") || "20");
+  const limit = Math.min(100, Math.max(1, parseInt(c.req.query("limit") || "20")));
+  const { rows } = await pool.query(
+    `SELECT id, type, agent_id, task_id, message, metadata, created_at
+     FROM activity_log ORDER BY id DESC LIMIT $1`,
+    [limit]
+  );
   return c.json({
-    activities: activityFeed.slice(0, limit),
-    total: activityFeed.length,
+    activities: rows.map(toActivity),
+    total: rows.length,
   });
 });
 
 // ─── SSE Activity Stream ───────────────────────────────────────
 webhookRoutes.get("/activity/stream", async (c) => {
-  const stream = new ReadableStream({
-    start(controller) {
-      const encoder = new TextEncoder();
-      controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "connected" })}\n\n`));
+  return streamSSE(c, async (stream) => {
+    await stream.writeSSE({ data: JSON.stringify({ type: "connected" }) });
+    const initial = await pool.query("SELECT COALESCE(MAX(id), 0) AS id FROM activity_log");
+    let lastId = Number(initial.rows[0]?.id || 0);
+    const expiresAt = Date.now() + 300_000;
 
-      let lastSent = activityFeed.length;
-      const interval = setInterval(() => {
-        if (activityFeed.length !== lastSent) {
-          const newCount = activityFeed.length - lastSent;
-          const newActivities = activityFeed.slice(0, newCount);
-          for (const activity of newActivities) {
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify(activity)}\n\n`));
-          }
-          lastSent = activityFeed.length;
-        }
-      }, 1000);
+    while (!stream.aborted && Date.now() < expiresAt) {
+      await stream.sleep(2_000);
+      if (stream.aborted) break;
 
-      setTimeout(() => { clearInterval(interval); controller.close(); }, 300000);
-    },
-  });
-
-  return new Response(stream, {
-    headers: {
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache",
-      Connection: "keep-alive",
-    },
+      const { rows } = await pool.query(
+        `SELECT id, type, agent_id, task_id, message, metadata, created_at
+         FROM activity_log WHERE id > $1 ORDER BY id ASC LIMIT 100`,
+        [lastId]
+      );
+      for (const row of rows) {
+        if (stream.aborted) break;
+        await stream.writeSSE({
+          id: String(row.id),
+          event: "activity",
+          data: JSON.stringify(toActivity(row)),
+        });
+        lastId = Number(row.id);
+      }
+    }
   });
 });
 
-// ─── Helper ────────────────────────────────────────────────────
-function addActivity(type: string, agent: string | null, task: string | null, message: string, metadata: any = {}) {
-  activityFeed.unshift({
-    type, agent, task, message, metadata,
-    timestamp: Date.now(),
-  });
-  if (activityFeed.length > 200) activityFeed.length = 200;
+function toActivity(row: any) {
+  return {
+    id: row.id,
+    type: row.type,
+    agent: row.agent_id,
+    task: row.task_id,
+    message: row.message,
+    metadata: row.metadata || {},
+    timestamp: new Date(row.created_at).getTime(),
+  };
 }
-
-export { activityFeed };

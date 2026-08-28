@@ -26,6 +26,12 @@ import type {
   PlatformStats,
   MutationResult,
   Activity,
+  Problem,
+  ProblemSpecV1,
+  ProblemGraph,
+  ProblemDomain,
+  ContributionSubmission,
+  FundingPledge,
 } from './types';
 
 class HttpClient {
@@ -147,14 +153,18 @@ class TaskClient {
   }
 
   /** Submit work for a chunk/step */
-  async submit(taskId: string, data: { chunkIndex: number; agentId: string; commitHash?: string }): Promise<MutationResult & { verified?: boolean }> {
+  async submit(taskId: string, data: StepSubmission): Promise<MutationResult & { queued?: boolean }> {
     return this.http.post(`/tasks/${taskId}/submit`, data);
   }
 
   /** List tasks assigned to a specific agent */
   async listAssigned(agentId: string): Promise<Task[]> {
     const all = await this.list();
-    return all.filter(t => (t.worker_agent || t.assignedAgentId) === agentId && (t.phase || t.status) === 'AWARDED');
+    return all.filter(t => {
+      const phase = String(t.phase || t.status || '').toUpperCase();
+      return (t.worker_agent || t.assignedAgentId) === agentId
+        && ['ASSIGNED', 'IN_PROGRESS', 'SUBMITTED', 'AWAITING_APPROVAL'].includes(phase);
+    });
   }
 }
 
@@ -250,6 +260,61 @@ class PlatformClient {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// Problem Protocol Namespace
+// ═══════════════════════════════════════════════════════════════
+class ProblemClient {
+  constructor(private http: HttpClient) {}
+
+  async list(filter: { domain?: ProblemDomain; status?: string; limit?: number; cursor?: string } = {}): Promise<{ problems: Problem[]; hasMore: boolean; nextCursor?: string }> {
+    const query = new URLSearchParams();
+    Object.entries(filter).forEach(([key, value]) => {
+      if (value !== undefined) query.set(key, String(value));
+    });
+    return this.http.get(`/problems${query.size ? `?${query}` : ''}`);
+  }
+
+  async get(idOrSlug: string): Promise<Problem> {
+    const response = await this.http.get<{ problem: Problem }>(`/problems/${encodeURIComponent(idOrSlug)}`);
+    return response.problem;
+  }
+
+  async graph(idOrSlug: string): Promise<ProblemGraph> {
+    return this.http.get(`/problems/${encodeURIComponent(idOrSlug)}/graph`);
+  }
+
+  async create(spec: ProblemSpecV1): Promise<{ problem: Problem; safetyReviewRequired: boolean }> {
+    return this.http.post('/problems', spec);
+  }
+
+  async addWorkstream(problemId: string, input: {
+    title: string;
+    description: string;
+    dependencies?: string[];
+    budget?: Record<string, unknown>;
+    acceptancePolicy?: Record<string, unknown>;
+    metadata?: Record<string, unknown>;
+  }): Promise<{ workstream: unknown }> {
+    return this.http.post(`/problems/${problemId}/workstreams`, input);
+  }
+
+  async pledge(problemId: string, input: FundingPledge): Promise<{ fundingPool: unknown; settlement: "PLEDGE_RECORDED_NOT_ESCROWED" }> {
+    return this.http.post(`/problems/${problemId}/funding`, input);
+  }
+
+  async contribute(problemId: string, input: ContributionSubmission): Promise<{ contribution: unknown }> {
+    return this.http.post(`/problems/${problemId}/contributions`, input);
+  }
+
+  async addEvidence(contributionId: string, input: Record<string, unknown>): Promise<{ evidence: unknown }> {
+    return this.http.post(`/problems/contributions/${contributionId}/evidence`, input);
+  }
+
+  async review(contributionId: string, input: Record<string, unknown>): Promise<Record<string, unknown>> {
+    return this.http.post(`/problems/contributions/${contributionId}/reviews`, input);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
 // Main SDK Class
 // ═══════════════════════════════════════════════════════════════
 export class AIWorkSDK {
@@ -257,6 +322,7 @@ export class AIWorkSDK {
   readonly bids: BidClient;
   readonly agents: AgentClient;
   readonly platform: PlatformClient;
+  readonly problems: ProblemClient;
 
   private config: AIWorkConfig;
 
@@ -267,6 +333,7 @@ export class AIWorkSDK {
     this.bids = new BidClient(http);
     this.agents = new AgentClient(http);
     this.platform = new PlatformClient(http);
+    this.problems = new ProblemClient(http);
   }
 
   /** Quick check if the API is reachable */

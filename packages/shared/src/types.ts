@@ -178,3 +178,63 @@ export interface PlatformStats {
     cancellationFeeBPS: number;
   };
 }
+
+// ═══════════════════════════════════════════════════════════════
+// Problem Protocol v1 — multi-contributor, evidence-led work
+// ═══════════════════════════════════════════════════════════════
+
+export type ProblemDomain =
+  | "SOFTWARE" | "MATHEMATICS" | "DATA" | "AI_ML" | "RESEARCH"
+  | "BIOMEDICAL" | "CLIMATE" | "ENGINEERING" | "POLICY" | "OTHER";
+
+export type ProblemStatus =
+  | "DRAFT" | "OPEN" | "ACTIVE" | "REVIEW" | "COMPLETED"
+  | "CANCELLED" | "QUARANTINED";
+
+export interface VerificationPolicy {
+  mode: "CODE" | "FORMAL_PROOF" | "REPRODUCIBLE_RESEARCH" | "EXPERT_PANEL" | "HYBRID";
+  minimumIndependentReviews: number;
+  replicationRequired: boolean;
+  minimumReplications?: number;
+  artifactRequirements?: Array<"SOURCE" | "DATA" | "METHODS" | "ENVIRONMENT" | "RESULTS" | "LICENSE" | "ETHICS_APPROVAL">;
+  acceptanceCriteria: string[];
+}
+
+export interface ProblemSpecV1 {
+  version: "1.0";
+  slug?: string;
+  title: string;
+  summary: string;
+  description: string;
+  domain: ProblemDomain;
+  visibility: "PUBLIC" | "UNLISTED" | "PRIVATE";
+  riskTier: "LOW" | "MODERATE" | "HIGH" | "RESTRICTED";
+  tags?: string[];
+  license: string;
+  funding?: {
+    amount?: string;
+    token?: string;
+    mechanisms?: Array<"GRANT" | "MILESTONE" | "PRIZE" | "REPLICATION_BOUNTY" | "RETROACTIVE">;
+  };
+  verificationPolicy: VerificationPolicy;
+  governance?: {
+    reviewerSelection?: "RANDOM_CREDENTIALLED" | "COMMUNITY" | "INSTITUTIONAL" | "HYBRID";
+    appealsAllowed?: boolean;
+    conflictDisclosureRequired?: boolean;
+  };
+  ethics?: {
+    humanSubjects?: boolean;
+    sensitiveData?: boolean;
+    dualUse?: boolean;
+    institutionalApprovalRequired?: boolean;
+    consentBasis?: "INFORMED_CONSENT" | "IRB_WAIVER" | "SECONDARY_USE_APPROVED" | "NOT_APPLICABLE";
+    dataClassification?: "PUBLIC" | "INTERNAL" | "CONTROLLED" | "RESTRICTED";
+    securityStandard?: "NONE" | "NIST_800_171" | "NIST_800_53_MODERATE" | "ISO_27001" | "EQUIVALENT";
+    highRiskLifeSciences?: "NONE" | "POTENTIAL_DGOF" | "DGOF" | "IROC";
+    jurisdiction?: string;
+    dataUseAgreementDigest?: string;
+    mitigationPlanDigest?: string;
+    requirements?: string[];
+  };
+  metadata?: Record<string, unknown>;
+}

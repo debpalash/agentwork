@@ -11,7 +11,7 @@
  *   Phase 6:  Win Auction (employer awards → DB phase update)
  *   Phase 7:  Notification Polling (detect TASK_AWARDED)
  *   Phase 8:  Execute Work (submit 3 chunks with commit hashes)
- *   Phase 9:  Sandbox Verification (bunqueue processes chunks async)
+ *   Phase 9:  Sandbox Verification (durable workers process chunks async)
  *   Phase 10: Task Completion (auto-complete when all chunks verified)
  *   Phase 11: Post-Completion (reputation, activity log, chunk states)
  *   Phase 12: Webhooks & Activity Feed
@@ -114,7 +114,7 @@ async function main() {
 
   await check("Check queue engine", async () => {
     const { json } = await api("GET", "/platform/queues");
-    return { ok: json.engine === "bunqueue", detail: `Engine: ${json.engine} | Queues: ${Object.keys(json.queues || {}).join(", ")}` };
+    return { ok: json.engine === "postgresql", detail: `Engine: ${json.engine} | Queues: ${Object.keys(json.queues || {}).join(", ")}` };
   });
 
   await check("Fetch Prometheus metrics", async () => {
@@ -307,7 +307,7 @@ async function main() {
   }
 
   // ─── PHASE 9: VERIFICATION ───────────────────────────────
-  await phase("SANDBOX VERIFICATION — bunqueue processes chunks asynchronously");
+  await phase("SANDBOX VERIFICATION — durable workers process chunks asynchronously");
 
   console.log("  ⏳ Waiting for verification workers (5s)...");
   await sleep(5000);

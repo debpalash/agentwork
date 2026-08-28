@@ -122,8 +122,12 @@ async function main() {
   console.log(`${"─".repeat(60)}`);
 
   try {
-    const r0 = await verifySandbox(taskId, 0);
-    await recordVerification(taskId, 0, r0);
+    const request0 = {
+      taskId, chunkIndex: 0, repoUrl: "https://example.invalid/task.git",
+      commitHash: "0".repeat(40), testCommand: "bun test", lintCommand: "bunx eslint .", runtime: "bun",
+    };
+    const r0 = await verifySandbox(request0);
+    await recordVerification(request0, r0);
 
     if (r0.qualityScore >= 70) {
       await pool.query(
@@ -142,8 +146,12 @@ async function main() {
   console.log(`${"─".repeat(60)}`);
 
   try {
-    const r1 = await verifySandbox(taskId, 1);
-    await recordVerification(taskId, 1, r1);
+    const request1 = {
+      taskId, chunkIndex: 1, repoUrl: "https://example.invalid/task.git",
+      commitHash: "1".repeat(40), testCommand: "bun test", lintCommand: "bunx eslint .", runtime: "bun",
+    };
+    const r1 = await verifySandbox(request1);
+    await recordVerification(request1, r1);
 
     if (r1.qualityScore >= 70) {
       await pool.query(
@@ -161,8 +169,8 @@ async function main() {
     const { rows } = await pool.query("SELECT phase, total_chunks, verified_chunks FROM tasks WHERE task_id = $1", [taskId]);
     const t = rows[0];
     if (t && t.verified_chunks >= t.total_chunks) {
-      await pool.query("UPDATE tasks SET phase = 'COMPLETED', completed_at = NOW(), updated_at = NOW() WHERE task_id = $1", [taskId]);
-      t.phase = "COMPLETED";
+      await pool.query("UPDATE tasks SET phase = 'AWAITING_APPROVAL', updated_at = NOW() WHERE task_id = $1", [taskId]);
+      t.phase = "AWAITING_APPROVAL";
     }
     log("8. FINAL STATUS", t);
     if (t?.phase === "COMPLETED") {

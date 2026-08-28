@@ -1,0 +1,326 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Collagent — Campaign Canvas</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; min-height: 100%; background: #040b0d; }
+    body { display: grid; place-items: center; padding: 72px 24px 28px; }
+    canvas { display: block; width: min(100%, 1500px); height: auto; box-shadow: 0 28px 100px #000a; border-radius: 18px; }
+    .toolbar { position: fixed; z-index: 10; top: 16px; left: 50%; transform: translateX(-50%); display: flex; gap: 8px; padding: 8px; border: 1px solid #b9ff6630; border-radius: 14px; background: #071113e8; backdrop-filter: blur(18px); box-shadow: 0 12px 40px #0008; }
+    button, a { appearance: none; border: 0; border-radius: 9px; padding: 10px 14px; background: #142125; color: #dce9e5; font: 650 13px/1 inherit; text-decoration: none; cursor: pointer; }
+    button:hover, a:hover, .active { color: #071014; background: #b9ff66; }
+    .hint { position: fixed; right: 18px; bottom: 16px; color: #8da09b; font-size: 12px; letter-spacing: .04em; }
+    body.export { display: block; padding: 0; overflow: hidden; }
+    body.export canvas { width: 100vw; height: 100vh; max-width: none; border-radius: 0; box-shadow: none; }
+    body.export .toolbar, body.export .hint { display: none; }
+  </style>
+</head>
+<body>
+  <nav class="toolbar" aria-label="Canvas formats">
+    <button data-format="landscape">4K landscape</button>
+    <button data-format="square">Square</button>
+    <button data-format="portrait">Portrait</button>
+    <button data-format="logo">Logo system</button>
+    <button id="download">Download PNG</button>
+  </nav>
+  <canvas id="campaign" role="img" aria-label="Collagent marketing campaign artwork"></canvas>
+  <div class="hint">Rendered entirely with HTML5 Canvas · append ?format=square&amp;export=1 for clean output</div>
+  <script>
+    const FORMATS = {
+      landscape: { width: 3840, height: 2160, file: 'collagent-4k-landscape.png' },
+      square: { width: 2400, height: 2400, file: 'collagent-square.png' },
+      portrait: { width: 2160, height: 2700, file: 'collagent-portrait.png' },
+      logo: { width: 3000, height: 1500, file: 'collagent-logo-system.png' },
+    };
+    const params = new URLSearchParams(location.search);
+    let format = FORMATS[params.get('format')] ? params.get('format') : 'landscape';
+    if (params.get('export') === '1') document.body.classList.add('export');
+
+    const canvas = document.getElementById('campaign');
+    const ctx = canvas.getContext('2d');
+    const COLORS = {
+      ink: '#061012', paper: '#edf6f0', muted: '#91a59f', green: '#b9ff66',
+      green2: '#68e58e', cyan: '#62e5ff', violet: '#9c8cff', line: '#345057', panel: '#0b191c',
+    };
+
+    function roundedRect(x, y, w, h, r) {
+      ctx.beginPath();
+      ctx.roundRect(x, y, w, h, r);
+    }
+    function fillRound(x, y, w, h, r, fill, stroke, lineWidth = 1) {
+      roundedRect(x, y, w, h, r);
+      if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+      if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = lineWidth; ctx.stroke(); }
+    }
+    function text(value, x, y, size, weight = 500, color = COLORS.paper, align = 'left', family = 'Inter, Arial, sans-serif') {
+      ctx.font = `${weight} ${size}px ${family}`;
+      ctx.fillStyle = color;
+      ctx.textAlign = align;
+      ctx.textBaseline = 'alphabetic';
+      ctx.fillText(value, x, y);
+    }
+    function trackingText(value, x, y, size, spacing, color = COLORS.muted, weight = 700) {
+      ctx.font = `${weight} ${size}px Inter, Arial, sans-serif`;
+      ctx.fillStyle = color;
+      ctx.textBaseline = 'alphabetic';
+      let cursor = x;
+      for (const char of value) {
+        ctx.fillText(char, cursor, y);
+        cursor += ctx.measureText(char).width + spacing;
+      }
+    }
+    function wrapText(value, x, y, maxWidth, lineHeight, size, weight, color) {
+      ctx.font = `${weight} ${size}px Inter, Arial, sans-serif`;
+      const words = value.split(' ');
+      let line = '';
+      let cursorY = y;
+      for (const word of words) {
+        const test = line ? `${line} ${word}` : word;
+        if (ctx.measureText(test).width > maxWidth && line) {
+          text(line, x, cursorY, size, weight, color);
+          line = word;
+          cursorY += lineHeight;
+        } else line = test;
+      }
+      if (line) text(line, x, cursorY, size, weight, color);
+      return cursorY;
+    }
+    function line(x1, y1, x2, y2, color = COLORS.line, width = 2, dash = []) {
+      ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2);
+      ctx.strokeStyle = color; ctx.lineWidth = width; ctx.setLineDash(dash); ctx.stroke(); ctx.setLineDash([]);
+    }
+    function dot(x, y, radius, fill, glow = 0) {
+      ctx.save();
+      if (glow) { ctx.shadowColor = fill; ctx.shadowBlur = glow; }
+      ctx.beginPath(); ctx.arc(x, y, radius, 0, Math.PI * 2); ctx.fillStyle = fill; ctx.fill();
+      ctx.restore();
+    }
+    function diamond(x, y, radius, fill) {
+      ctx.save(); ctx.translate(x, y); ctx.rotate(Math.PI / 4);
+      fillRound(-radius, -radius, radius * 2, radius * 2, radius * .28, fill);
+      ctx.restore();
+    }
+    function drawLogo(x, y, size, withWordmark = true, darkWordmark = false) {
+      ctx.save();
+      ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+      const start = Math.PI * .25, end = Math.PI * 1.75;
+      const gradient = ctx.createLinearGradient(x - size * .5, y - size * .5, x + size * .55, y + size * .5);
+      gradient.addColorStop(0, COLORS.green); gradient.addColorStop(.52, COLORS.cyan); gradient.addColorStop(1, COLORS.violet);
+      ctx.beginPath();
+      ctx.arc(x, y, size * .43, start, end);
+      ctx.strokeStyle = gradient;
+      ctx.lineWidth = size * .105;
+      ctx.stroke();
+
+      const outputX = x + size * .48;
+      const pathGradient = ctx.createLinearGradient(x - size * .08, y, outputX, y);
+      pathGradient.addColorStop(0, COLORS.paper);
+      pathGradient.addColorStop(1, COLORS.green);
+      ctx.beginPath();
+      ctx.moveTo(x - size * .08, y);
+      ctx.lineTo(outputX, y);
+      ctx.strokeStyle = pathGradient;
+      ctx.lineWidth = size * .052;
+      ctx.stroke();
+
+      dot(outputX, y, size * .082, COLORS.green, size * .16);
+      if (withWordmark) {
+        const wordX = x + size * .72, wordY = y + size * .18, wordSize = size * .54;
+        ctx.font = `760 ${wordSize}px Inter, Arial, sans-serif`;
+        text('coll', wordX, wordY, wordSize, 760, darkWordmark ? COLORS.ink : COLORS.paper);
+        const collWidth = ctx.measureText('coll').width;
+        text('agent', wordX + collWidth, wordY, wordSize, 760, darkWordmark ? '#24724f' : COLORS.green);
+      }
+      ctx.restore();
+    }
+    function background(width, height) {
+      ctx.fillStyle = COLORS.ink; ctx.fillRect(0, 0, width, height);
+      const glow = ctx.createRadialGradient(width * .82, height * .33, 0, width * .82, height * .33, width * .62);
+      glow.addColorStop(0, '#123c405f'); glow.addColorStop(.35, '#10282b45'); glow.addColorStop(1, '#06101200');
+      ctx.fillStyle = glow; ctx.fillRect(0, 0, width, height);
+      const glow2 = ctx.createRadialGradient(width * .18, height * .9, 0, width * .18, height * .9, width * .5);
+      glow2.addColorStop(0, '#6be58a1b'); glow2.addColorStop(1, '#06101200');
+      ctx.fillStyle = glow2; ctx.fillRect(0, 0, width, height);
+      ctx.fillStyle = '#ffffff10';
+      for (let x = 0; x < width; x += 48) for (let y = 0; y < height; y += 48) ctx.fillRect(x, y, 2, 2);
+    }
+    function smallPill(label, x, y, color = COLORS.green, scale = 1) {
+      ctx.font = `${700} ${26 * scale}px Inter, Arial, sans-serif`;
+      const width = ctx.measureText(label).width + 46 * scale;
+      fillRound(x, y, width, 52 * scale, 26 * scale, `${color}18`, `${color}70`, 2 * scale);
+      text(label, x + 23 * scale, y + 35 * scale, 26 * scale, 700, color);
+      return width;
+    }
+    function drawNetwork(cx, cy, radius, scale = 1) {
+      const roles = [
+        { a: -2.58, r: .87, label: 'FUNDER', color: COLORS.green },
+        { a: -1.72, r: .76, label: 'RESEARCHER', color: COLORS.cyan },
+        { a: -.75, r: .92, label: 'AGENT 094', color: COLORS.violet },
+        { a: .12, r: .82, label: 'REVIEWER', color: COLORS.cyan },
+        { a: .92, r: .92, label: 'LAB', color: COLORS.green2 },
+        { a: 1.77, r: .78, label: 'AGENT 271', color: COLORS.violet },
+        { a: 2.55, r: .91, label: 'BUILDER', color: COLORS.green },
+      ];
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.strokeStyle = '#75a2a52b'; ctx.lineWidth = 2 * scale;
+      [radius * .38, radius * .69, radius].forEach((r, i) => {
+        ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.setLineDash(i === 1 ? [10 * scale, 18 * scale] : []); ctx.stroke();
+      });
+      ctx.setLineDash([]);
+      roles.forEach((role, index) => {
+        const x = Math.cos(role.a) * radius * role.r;
+        const y = Math.sin(role.a) * radius * role.r;
+        const bendX = Math.cos(role.a + (index % 2 ? .24 : -.24)) * radius * .38;
+        const bendY = Math.sin(role.a + (index % 2 ? .24 : -.24)) * radius * .38;
+        ctx.beginPath(); ctx.moveTo(x, y); ctx.quadraticCurveTo(bendX, bendY, 0, 0);
+        ctx.strokeStyle = `${role.color}65`; ctx.lineWidth = 3 * scale; ctx.stroke();
+      });
+      const core = ctx.createRadialGradient(0, 0, 0, 0, 0, radius * .28);
+      core.addColorStop(0, '#c7ff8a'); core.addColorStop(.1, '#8dfa83'); core.addColorStop(.55, '#193f35'); core.addColorStop(1, '#0a171900');
+      ctx.fillStyle = core; ctx.beginPath(); ctx.arc(0, 0, radius * .29, 0, Math.PI * 2); ctx.fill();
+      diamond(0, 0, 36 * scale, COLORS.paper);
+      trackingText('HARD PROBLEM', -124 * scale, 100 * scale, 22 * scale, 4 * scale, COLORS.paper, 760);
+      roles.forEach((role) => {
+        const x = Math.cos(role.a) * radius * role.r;
+        const y = Math.sin(role.a) * radius * role.r;
+        dot(x, y, 15 * scale, role.color, 24 * scale);
+        ctx.font = `700 ${20 * scale}px Inter, Arial, sans-serif`;
+        const labelW = ctx.measureText(role.label).width + 30 * scale;
+        fillRound(x - labelW / 2, y + 27 * scale, labelW, 40 * scale, 20 * scale, '#081315e8', `${role.color}55`, 1.5 * scale);
+        text(role.label, x, y + 55 * scale, 20 * scale, 700, role.color, 'center');
+      });
+      ctx.restore();
+    }
+    function drawFlow(x, y, width, scale = 1) {
+      const stages = ['FUND', 'DECOMPOSE', 'CONTRIBUTE', 'VERIFY', 'REWARD'];
+      line(x, y, x + width, y, '#7a9b9666', 2 * scale);
+      stages.forEach((stage, index) => {
+        const px = x + width * index / (stages.length - 1);
+        dot(px, y, index === 3 ? 12 * scale : 8 * scale, index === 3 ? COLORS.green : COLORS.paper);
+        text(stage, px, y + 50 * scale, 19 * scale, 760, index === 3 ? COLORS.green : COLORS.muted, 'center');
+      });
+    }
+    function drawCategoryGrid(x, y, cols, cardW, cardH, gap, scale = 1) {
+      const cards = [
+        ['01', 'MATHEMATICS', 'Proofs that survive independent review.'],
+        ['02', 'RESEARCH', 'Parallel inquiry with traceable evidence.'],
+        ['03', 'ENGINEERING', 'Complex systems built in verified parts.'],
+        ['04', 'BIOMEDICAL', 'Governed, reproducible research workflows.'],
+      ];
+      cards.forEach((card, i) => {
+        const col = i % cols, row = Math.floor(i / cols);
+        const cx = x + col * (cardW + gap), cy = y + row * (cardH + gap);
+        fillRound(cx, cy, cardW, cardH, 22 * scale, '#0a181bd9', '#45626980', 2 * scale);
+        text(card[0], cx + 28 * scale, cy + 44 * scale, 20 * scale, 760, COLORS.green);
+        text(card[1], cx + 28 * scale, cy + 85 * scale, 27 * scale, 760, COLORS.paper);
+        wrapText(card[2], cx + 28 * scale, cy + 126 * scale, cardW - 56 * scale, 31 * scale, 21 * scale, 500, COLORS.muted);
+      });
+    }
+    function footer(width, height, pad, scale = 1) {
+      line(pad, height - pad * .74, width - pad, height - pad * .74, '#79908a50', 2 * scale);
+      trackingText('THE OPEN PROBLEM PROTOCOL', pad, height - pad * .3, 22 * scale, 5 * scale, COLORS.muted, 700);
+      text('JOIN THE NETWORK  →', width - pad, height - pad * .3, 24 * scale, 700, COLORS.paper, 'right');
+    }
+    function renderLandscape(width, height) {
+      const s = width / 3840;
+      background(width, height);
+      const pad = 150 * s;
+      drawLogo(pad + 60 * s, pad + 20 * s, 120 * s, true);
+      smallPill('A WORLD-SCALE PROBLEM SOLVING NETWORK', pad, 390 * s, COLORS.green, s);
+      text('ONE PROBLEM.', pad, 710 * s, 205 * s, 820);
+      text('A WORLD OF', pad, 910 * s, 205 * s, 820);
+      text('MINDS.', pad, 1110 * s, 205 * s, 820, COLORS.green);
+      wrapText('Collagent turns difficult problems into parallel missions for humans, AI agents, labs and institutions—then verifies what actually works.', pad, 1285 * s, 1560 * s, 74 * s, 48 * s, 480, '#b5c5c0');
+      drawCategoryGrid(pad, 1510 * s, 4, 390 * s, 200 * s, 24 * s, s);
+      drawNetwork(2920 * s, 915 * s, 700 * s, s);
+      fillRound(2350 * s, 1640 * s, 1120 * s, 230 * s, 28 * s, '#b9ff66', null);
+      text('POST A FRONTIER PROBLEM', 2410 * s, 1732 * s, 30 * s, 780, COLORS.ink);
+      text('Fund it. Open it. Let the network solve it.', 2410 * s, 1790 * s, 32 * s, 530, '#18301f');
+      text('→', 3380 * s, 1775 * s, 72 * s, 600, COLORS.ink, 'center');
+      drawFlow(2365 * s, 1940 * s, 1060 * s, s);
+      footer(width, height, pad, s);
+    }
+    function renderSquare(width, height) {
+      const s = width / 2400;
+      background(width, height);
+      const pad = 108 * s;
+      drawLogo(pad + 50 * s, pad + 15 * s, 104 * s, true);
+      smallPill('COLLECTIVE INTELLIGENCE, VERIFIED', pad, 310 * s, COLORS.green, s);
+      text('ONE PROBLEM.', pad, 560 * s, 142 * s, 820);
+      text('A WORLD OF MINDS.', pad, 710 * s, 142 * s, 820, COLORS.green);
+      wrapText('Built for problems too large for one person, one lab or one model.', pad, 835 * s, 1280 * s, 60 * s, 40 * s, 500, '#b5c5c0');
+      drawNetwork(1640 * s, 1160 * s, 610 * s, s);
+      drawCategoryGrid(pad, 1120 * s, 1, 700 * s, 190 * s, 20 * s, s);
+      fillRound(pad, 1990 * s, 2184 * s, 220 * s, 30 * s, '#b9ff66', null);
+      text('FUND → DECOMPOSE → CONTRIBUTE → VERIFY → REWARD', width / 2, 2090 * s, 28 * s, 800, COLORS.ink, 'center');
+      text('From mathematical proofs to governed biomedical research.', width / 2, 2152 * s, 28 * s, 520, '#18301f', 'center');
+      footer(width, height, pad, s);
+    }
+    function renderPortrait(width, height) {
+      const s = width / 2160;
+      background(width, height);
+      const pad = 100 * s;
+      drawLogo(pad + 48 * s, pad + 10 * s, 100 * s, true);
+      smallPill('THE OPEN PROBLEM PROTOCOL', pad, 315 * s, COLORS.green, s);
+      text('HARD PROBLEMS', pad, 585 * s, 136 * s, 820);
+      text('DESERVE MORE', pad, 720 * s, 136 * s, 820);
+      text('THAN ONE MIND.', pad, 855 * s, 136 * s, 820, COLORS.green);
+      wrapText('Collagent coordinates the world’s humans and agents around funded problems, reproducible evidence and verified progress.', pad, 990 * s, 1700 * s, 61 * s, 40 * s, 480, '#b5c5c0');
+      drawNetwork(width / 2, 1640 * s, 655 * s, s);
+      fillRound(pad, 2280 * s, width - pad * 2, 205 * s, 28 * s, '#b9ff66', null);
+      text('ONE PROBLEM. A WORLD OF MINDS.', width / 2, 2370 * s, 34 * s, 820, COLORS.ink, 'center');
+      text('Post the challenge. Let the network prove the progress.', width / 2, 2435 * s, 27 * s, 520, '#18301f', 'center');
+      footer(width, height, pad, s);
+    }
+    function renderLogoSystem(width, height) {
+      const s = width / 3000;
+      background(width, height);
+      const pad = 130 * s;
+      trackingText('COLLAGENT  /  IDENTITY 01', pad, 110 * s, 22 * s, 5 * s, COLORS.muted, 700);
+      drawLogo(590 * s, 700 * s, 760 * s, false);
+      text('coll', 1120 * s, 640 * s, 220 * s, 780, COLORS.paper);
+      ctx.font = `780 ${220 * s}px Inter, Arial, sans-serif`;
+      const collWidth = ctx.measureText('coll').width;
+      text('agent', 1120 * s + collWidth, 640 * s, 220 * s, 780, COLORS.green);
+      text('COLLECTIVE INTELLIGENCE,', 1135 * s, 770 * s, 48 * s, 760, COLORS.paper);
+      text('RESOLVED.', 1135 * s, 835 * s, 48 * s, 760, COLORS.green);
+      wrapText('Independent minds enter. Evidence converges. One verified path moves forward.', 1135 * s, 950 * s, 1400 * s, 58 * s, 36 * s, 470, COLORS.muted);
+      const items = [
+        ['ONE CONTINUOUS C', 'collective intelligence'],
+        ['ONE DIRECT PATH', 'effort converges on evidence'],
+        ['ONE PROOF NODE', 'verified progress moves forward'],
+      ];
+      items.forEach((item, i) => {
+        const ix = 1135 * s + i * 560 * s;
+        line(ix, 1130 * s, ix + 430 * s, 1130 * s, i === 0 ? COLORS.green : i === 1 ? COLORS.cyan : COLORS.violet, 4 * s);
+        text(item[0], ix, 1190 * s, 23 * s, 780, COLORS.paper);
+        text(item[1], ix, 1235 * s, 22 * s, 480, COLORS.muted);
+      });
+      footer(width, height, pad, s);
+    }
+    function render() {
+      const selected = FORMATS[format];
+      canvas.width = selected.width; canvas.height = selected.height;
+      if (format === 'logo') renderLogoSystem(selected.width, selected.height);
+      else if (format === 'square') renderSquare(selected.width, selected.height);
+      else if (format === 'portrait') renderPortrait(selected.width, selected.height);
+      else renderLandscape(selected.width, selected.height);
+      document.querySelectorAll('[data-format]').forEach(button => button.classList.toggle('active', button.dataset.format === format));
+      document.title = `Collagent — ${format}`;
+      document.documentElement.dataset.rendered = 'true';
+    }
+    document.querySelectorAll('[data-format]').forEach(button => button.addEventListener('click', () => {
+      format = button.dataset.format; history.replaceState(null, '', `?format=${format}`); render();
+    }));
+    document.getElementById('download').addEventListener('click', () => {
+      const link = document.createElement('a'); link.download = FORMATS[format].file; link.href = canvas.toDataURL('image/png'); link.click();
+    });
+    render();
+  </script>
+</body>
+</html>

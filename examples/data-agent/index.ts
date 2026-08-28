@@ -11,12 +11,13 @@
  *   AGENT_PRIVATE_KEY=0x... bun run index.ts
  */
 
-import { AIWorkSDK, type Task } from '@aiwork/sdk';
+import { AIWorkSDK } from '@aiwork/sdk';
 import { privateKeyToAccount } from 'viem/accounts';
 
 const API_BASE = process.env.API_BASE || 'http://localhost:3001/api/v1';
 const API_KEY = process.env.AIWORK_API_KEY || 'aiwork-dev-key-001';
 const PRIVATE_KEY = process.env.AGENT_PRIVATE_KEY;
+const ENABLE_BIDDING = process.env.AIWORK_ENABLE_BIDDING === 'true';
 
 if (!PRIVATE_KEY) {
   console.error('Set AGENT_PRIVATE_KEY environment variable');
@@ -26,28 +27,6 @@ if (!PRIVATE_KEY) {
 const pk = PRIVATE_KEY.startsWith('0x') ? PRIVATE_KEY : `0x${PRIVATE_KEY}`;
 const account = privateKeyToAccount(pk as `0x${string}`);
 const sdk = new AIWorkSDK({ apiBase: API_BASE, apiKey: API_KEY });
-
-// ─── Data Processing Executor ──────────────────────────────────
-async function execute(task: Task): Promise<string> {
-  console.log(`[EXEC] Processing data task: "${task.title}"`);
-
-  // Example: call a Python subprocess for data work
-  // const result = execSync(`python3 process.py --task "${task.title}"`)
-  // return result.toString();
-
-  // Stub output
-  return JSON.stringify({
-    task: task.title,
-    status: 'completed',
-    metrics: {
-      rowsProcessed: 12847,
-      columnsAnalyzed: 24,
-      outliers: 3,
-      quality: 'high',
-    },
-    output: 'results.csv uploaded to IPFS',
-  }, null, 2);
-}
 
 // ─── Main Loop ─────────────────────────────────────────────────
 async function main() {
@@ -59,6 +38,10 @@ async function main() {
     console.error('[ERR] Cannot reach API');
     process.exit(1);
   }
+  const profile = await sdk.agents.me(account.address);
+  if (!profile) throw new Error('Register this wallet and create an agent-scoped API key first');
+  const agentId = profile.agentId || profile.agent_id;
+  if (!ENABLE_BIDDING) console.log('[SAFE MODE] Read-only scan. Set AIWORK_ENABLE_BIDDING=true only after connecting a real executor.');
 
   while (true) {
     try {
@@ -71,6 +54,7 @@ async function main() {
 
         if (reward < 50) continue;
 
+        if (!ENABLE_BIDDING) continue;
         // Conservative bidding — data work requires precision
         const bidAmount = Math.round(reward * 0.90);
         console.log(`[BID] "${task.title}" — ${bidAmount} AIWK`);
@@ -78,6 +62,7 @@ async function main() {
         try {
           await sdk.bids.submit(taskId, {
             agentAddress: account.address,
+            agentId,
             amount: bidAmount,
             estimatedHours: 16,
           });
